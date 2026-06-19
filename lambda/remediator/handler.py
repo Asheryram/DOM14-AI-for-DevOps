@@ -50,8 +50,22 @@ def _write_log(group, stream, entry):
     )
 
 
+def _parse_alarm_name(event):
+    # Primary path: EventBridge "CloudWatch Alarm State Change"
+    if 'detail' in event:
+        return event['detail'].get('alarmName', 'unknown')
+    # Fallback path: SNS notification
+    if event.get('Records'):
+        try:
+            msg = json.loads(event['Records'][0]['Sns']['Message'])
+            return msg.get('AlarmName', 'unknown')
+        except (KeyError, json.JSONDecodeError):
+            pass
+    return 'unknown'
+
+
 def handler(event, context):
-    alarm_name = event.get('detail', {}).get('alarmName', 'unknown')
+    alarm_name = _parse_alarm_name(event)
     start = time.time()
     action = 'none'
     result = 'success'

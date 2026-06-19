@@ -113,6 +113,42 @@ resource "aws_sns_topic_subscription" "remediator" {
   endpoint  = aws_lambda_function.remediator.arn
 }
 
+# ── EventBridge rule: CloudWatch Alarm → Remediator Lambda ───────────────────
+# This is the primary remediation trigger the project objectives call for.
+# The SNS subscription above remains as a fallback notification path.
+
+resource "aws_cloudwatch_event_rule" "alarm_to_remediation" {
+  name        = "${var.name_prefix}-AlarmToRemediation"
+  description = "Routes CloudWatch ALARM state changes to the remediator Lambda"
+
+  event_pattern = jsonencode({
+    source      = ["aws.cloudwatch"]
+    detail-type = ["CloudWatch Alarm State Change"]
+    detail = {
+      state = { value = ["ALARM"] }
+      alarmName = [
+        "${var.name_prefix}-ErrorRate-High",
+        "${var.name_prefix}-CPU-High",
+        "${var.name_prefix}-Memory-High"
+      ]
+    }
+  })
+}
+
+resource "aws_cloudwatch_event_target" "remediator" {
+  rule      = aws_cloudwatch_event_rule.alarm_to_remediation.name
+  target_id = "RemediatorLambda"
+  arn       = aws_lambda_function.remediator.arn
+}
+
+resource "aws_lambda_permission" "remediator_eventbridge" {
+  statement_id  = "AllowEventBridgeInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.remediator.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.alarm_to_remediation.arn
+}
+
 # ── RCA Summariser Lambda ─────────────────────────────────────────────────────
 
 resource "aws_lambda_function" "rca_summariser" {
