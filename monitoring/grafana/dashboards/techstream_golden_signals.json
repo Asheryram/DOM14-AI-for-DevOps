@@ -1,0 +1,134 @@
+{
+  "dashboard": {
+    "title": "TechStream Golden Signals",
+    "uid": "techstream-golden-signals",
+    "tags": ["techstream", "golden-signals"],
+    "timezone": "utc",
+    "refresh": "15s",
+    "schemaVersion": 38,
+    "panels": [
+      {
+        "id": 1,
+        "type": "timeseries",
+        "title": "Latency (p50 / p95 / p99)",
+        "gridPos": {"x": 0, "y": 0, "w": 12, "h": 9},
+        "fieldConfig": {
+          "defaults": {"unit": "s", "color": {"mode": "palette-classic"}}
+        },
+        "targets": [
+          {"expr": "histogram_quantile(0.50, sum(rate(techstream_request_latency_seconds_bucket[2m])) by (le, endpoint))", "legendFormat": "p50 {{endpoint}}", "refId": "A"},
+          {"expr": "histogram_quantile(0.95, sum(rate(techstream_request_latency_seconds_bucket[2m])) by (le, endpoint))", "legendFormat": "p95 {{endpoint}}", "refId": "B"},
+          {"expr": "histogram_quantile(0.99, sum(rate(techstream_request_latency_seconds_bucket[2m])) by (le, endpoint))", "legendFormat": "p99 {{endpoint}}", "refId": "C"}
+        ]
+      },
+      {
+        "id": 2,
+        "type": "timeseries",
+        "title": "Traffic (req/s by endpoint)",
+        "gridPos": {"x": 12, "y": 0, "w": 12, "h": 9},
+        "fieldConfig": {
+          "defaults": {"unit": "reqps", "color": {"mode": "palette-classic"}}
+        },
+        "targets": [
+          {"expr": "sum(rate(techstream_request_total[2m])) by (endpoint, method)", "legendFormat": "{{method}} {{endpoint}}", "refId": "A"}
+        ]
+      },
+      {
+        "id": 3,
+        "type": "stat",
+        "title": "Error Rate (5xx %)",
+        "gridPos": {"x": 0, "y": 9, "w": 12, "h": 9},
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 1},
+                {"color": "red", "value": 5}
+              ]
+            }
+          }
+        },
+        "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+        "targets": [
+          {
+            "expr": "100 * (sum(rate(techstream_request_total{status=~\"5..\"}[2m])) or vector(0)) / sum(rate(techstream_request_total[2m]))",
+            "legendFormat": "5xx %",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "type": "gauge",
+        "title": "Saturation (CPU % per instance)",
+        "gridPos": {"x": 12, "y": 9, "w": 12, "h": 9},
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 70},
+                {"color": "red", "value": 85}
+              ]
+            }
+          }
+        },
+        "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+        "targets": [
+          {
+            "expr": "100 - avg by (instance_id) (rate(node_cpu_seconds_total{mode=\"idle\"}[2m]) * 100)",
+            "legendFormat": "{{instance_id}}",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "type": "timeseries",
+        "title": "Error Count by Status",
+        "gridPos": {"x": 0, "y": 18, "w": 12, "h": 9},
+        "fieldConfig": {
+          "defaults": {"unit": "short", "color": {"mode": "palette-classic"}}
+        },
+        "targets": [
+          {"expr": "sum(rate(techstream_error_total[2m])) by (endpoint, status)", "legendFormat": "{{status}} {{endpoint}}", "refId": "A"}
+        ]
+      },
+      {
+        "id": 6,
+        "type": "timeseries",
+        "title": "Memory Usage %",
+        "gridPos": {"x": 12, "y": 18, "w": 12, "h": 9},
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 75},
+                {"color": "red", "value": 90}
+              ]
+            }
+          }
+        },
+        "targets": [
+          {
+            "expr": "avg by (instance_id) (node_memory_MemUsed_bytes / node_memory_MemTotal_bytes * 100)",
+            "legendFormat": "{{instance_id}}",
+            "refId": "A"
+          }
+        ]
+      }
+    ]
+  }
+}

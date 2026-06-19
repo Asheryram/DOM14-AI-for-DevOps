@@ -1,0 +1,9 @@
+FROM grafana/grafana:10.4.2
+
+# Bake provisioning files into the image.
+# Grafana 9.1+ expands ${ENV_VAR} at startup — datasource URLs and region
+# are injected at runtime via ECS task environment variables.
+COPY grafana/provisioning /etc/grafana/provisioning
+COPY grafana/dashboards /var/lib/grafana/dashboards
+
+USER grafana
