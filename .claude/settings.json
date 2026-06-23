@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"c:/Users/YramAsherTetteh-Abot/OneDrive - AmaliTech gGmbH/Desktop/DOM14 AI for DevOps\" && ls -la \"C:/Users/YramAsherTetteh-Abot/.claude/projects/c--Users-YramAsherTetteh-Abot-OneDrive---AmaliTech-gGmbH-Desktop-DOM14-AI-for-DevOps/cb5e5e6d-ef00-4b8b-a18d-d26b09b27e3f/subagents/workflows/wf_eb21e55d-e8f/\" 2>/dev/null)",
+      "Read(//c/Users/YramAsherTetteh-Abot/.claude/projects/c--Users-YramAsherTetteh-Abot-OneDrive---AmaliTech-gGmbH-Desktop-DOM14-AI-for-DevOps/cb5e5e6d-ef00-4b8b-a18d-d26b09b27e3f/subagents/workflows/wf_eb21e55d-e8f/**)",
+      "Bash(bash --version)",
+      "WebSearch"
+    ]
+  }
+}

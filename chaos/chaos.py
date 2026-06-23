@@ -7,7 +7,7 @@ import subprocess
 import psutil
 import multiprocessing
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 LOG_GROUP = '/techstream/chaos-events'
 
@@ -34,7 +34,7 @@ def scenario_http_500(alb_dns, region, duration=180):
     cw_log(client, stream, {
         'chaos_start': {
             'scenario': 'http_500',
-            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             'target_endpoint': f'http://{alb_dns}/api/v1/ingest',
             'expected_signal_impact': '5xx increase >10%'
         }
@@ -74,7 +74,7 @@ def scenario_http_500(alb_dns, region, duration=180):
     cw_log(client, stream, {
         'chaos_end': {
             'scenario': 'http_500',
-            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             'total_requests': total_count,
             'error_requests': error_count
         }
@@ -87,7 +87,7 @@ def scenario_cpu_spike(region, duration=120):
     cw_log(client, stream, {
         'chaos_start': {
             'scenario': 'cpu_spike',
-            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             'expected_signal_impact': 'CPU >85%'
         }
     })
@@ -104,20 +104,19 @@ def scenario_cpu_spike(region, duration=120):
         def busy_loop(sec):
             end = time.time() + sec
             while time.time() < end:
-                x = sum(i * i for i in range(100000))
+                sum(i * i for i in range(100000))
 
-        procs = [multiprocessing.Process(target=busy_loop, args=(duration,)) for _ in range(multiprocessing.cpu_count())]
-        for p in procs:
-            p.start()
-        start = time.time()
-        while time.time() - start < duration:
-            cpu = psutil.cpu_percent(interval=5)
-            print(f'[cpu_spike] elapsed={int(time.time()-start)}s  cpu={cpu}%')
-        for p in procs:
-            p.join()
+        cpu_count = multiprocessing.cpu_count()
+        with concurrent.futures.ProcessPoolExecutor(max_workers=cpu_count) as executor:
+            futs = [executor.submit(busy_loop, duration) for _ in range(cpu_count)]
+            start = time.time()
+            while time.time() - start < duration:
+                cpu = psutil.cpu_percent(interval=5)
+                print(f'[cpu_spike] elapsed={int(time.time()-start)}s  cpu={cpu}%')
+            concurrent.futures.wait(futs)
 
     cw_log(client, stream, {
-        'chaos_end': {'scenario': 'cpu_spike', 'timestamp': datetime.utcnow().isoformat() + 'Z'}
+        'chaos_end': {'scenario': 'cpu_spike', 'timestamp': datetime.now(timezone.utc).isoformat()}
     })
 
 
@@ -127,7 +126,7 @@ def scenario_memory_leak(region, target_pct=90, max_duration=300):
     cw_log(client, stream, {
         'chaos_start': {
             'scenario': 'memory_leak',
-            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             'expected_signal_impact': f'memory >{target_pct}%'
         }
     })
@@ -150,7 +149,7 @@ def scenario_memory_leak(region, target_pct=90, max_duration=300):
     cw_log(client, stream, {
         'chaos_end': {
             'scenario': 'memory_leak',
-            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             'threshold_reached': reached
         }
     })

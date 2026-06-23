@@ -1,28 +1,34 @@
 #!/bin/bash
-set -euo pipefail
-exec > >(tee /var/log/cloud-init-output.log | logger -t user-data) 2>&1
+exec > /var/log/cloud-init-output.log 2>&1
 
-# ── SSM Agent (ensure running before anything else) ───────────────────────────
-systemctl enable amazon-ssm-agent
-systemctl start amazon-ssm-agent
+# ── SSM Agent ─────────────────────────────────────────────────────────────────
+snap install amazon-ssm-agent --classic
+systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service
+systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service
 
-# ── System packages ───────────────────────────────────────────────────────────
-dnf update -y
-dnf install -y wget tar gzip
+# ── Docker ────────────────────────────────────────────────────────────────────
+apt-get update -y
+apt-get install -y ca-certificates curl gnupg
 
-# ── Prometheus ────────────────────────────────────────────────────────────────
-PROM_VERSION="2.51.0"
-wget -q "https://github.com/prometheus/prometheus/releases/download/v$${PROM_VERSION}/prometheus-$${PROM_VERSION}.linux-amd64.tar.gz" \
-     -O /tmp/prom.tar.gz
-tar -xzf /tmp/prom.tar.gz -C /opt/
-ln -sf "/opt/prometheus-$${PROM_VERSION}.linux-amd64" /opt/prometheus
-mkdir -p /opt/prometheus/data
-useradd --system --no-create-home --shell /bin/false prometheus || true
-chown -R prometheus:prometheus /opt/prometheus
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
 
-cat > /opt/prometheus/prometheus.yml <<PROMCFG
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  > /etc/apt/sources.list.d/docker.list
+
+apt-get update -y
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+systemctl enable --now docker
+
+# ── Prometheus config ─────────────────────────────────────────────────────────
+mkdir -p /opt/monitoring
+
+cat > /opt/monitoring/prometheus.yml <<PROMCFG
 global:
-  scrape_interval:     15s
+  scrape_interval: 15s
   evaluation_interval: 15s
 
 scrape_configs:
@@ -41,46 +47,24 @@ scrape_configs:
         target_label: private_ip
 PROMCFG
 
-cat > /etc/systemd/system/prometheus.service <<SYSD
-[Unit]
-Description=Prometheus
-After=network.target
+# ── Grafana provisioning ──────────────────────────────────────────────────────
+mkdir -p /opt/monitoring/grafana/provisioning/datasources
+mkdir -p /opt/monitoring/grafana/provisioning/dashboards
+mkdir -p /opt/monitoring/grafana/dashboards
 
-[Service]
-User=prometheus
-ExecStart=/opt/prometheus/prometheus \
-  --config.file=/opt/prometheus/prometheus.yml \
-  --storage.tsdb.path=/opt/prometheus/data \
-  --storage.tsdb.retention.time=15d \
-  --web.enable-lifecycle
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-SYSD
-
-systemctl daemon-reload
-systemctl enable --now prometheus
-
-# ── Grafana ───────────────────────────────────────────────────────────────────
-dnf install -y https://dl.grafana.com/oss/release/grafana-10.4.2-1.x86_64.rpm
-
-mkdir -p /etc/grafana/provisioning/datasources
-cat > /etc/grafana/provisioning/datasources/prometheus.yaml <<DSCFG
+cat > /opt/monitoring/grafana/provisioning/datasources/prometheus.yaml <<DSCFG
 apiVersion: 1
 datasources:
   - name: Prometheus
     type: prometheus
     uid: prometheus
-    url: http://localhost:9090
+    url: http://prometheus:9090
     access: proxy
     isDefault: true
     editable: false
 DSCFG
 
-mkdir -p /etc/grafana/provisioning/dashboards
-cat > /etc/grafana/provisioning/dashboards/provider.yaml <<DASHPROV
+cat > /opt/monitoring/grafana/provisioning/dashboards/provider.yaml <<DASHPROV
 apiVersion: 1
 providers:
   - name: TechStream
@@ -90,17 +74,46 @@ providers:
       path: /var/lib/grafana/dashboards
 DASHPROV
 
-mkdir -p /var/lib/grafana/dashboards
-echo "${dashboard_json_b64}" | base64 -d \
-  > /var/lib/grafana/dashboards/techstream_golden_signals.json
-chown -R grafana:grafana /var/lib/grafana/dashboards /etc/grafana/provisioning
+cat > /opt/monitoring/grafana/dashboards/techstream_golden_signals.json << 'DASHEOF'
+${dashboard_json}
+DASHEOF
 
-mkdir -p /etc/systemd/system/grafana-server.service.d
-cat > /etc/systemd/system/grafana-server.service.d/override.conf <<GENV
-[Service]
-Environment=GF_SECURITY_ADMIN_PASSWORD=${grafana_admin_password}
-Environment=GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/techstream_golden_signals.json
-GENV
+# ── Docker Compose ────────────────────────────────────────────────────────────
+cat > /opt/monitoring/docker-compose.yml <<COMPOSE
+services:
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - /opt/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
 
-systemctl daemon-reload
-systemctl enable --now grafana-server
+  grafana:
+    image: grafana/grafana:10.4.2
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${grafana_admin_password}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/techstream_golden_signals.json
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - /opt/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - /opt/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+volumes:
+  prometheus_data:
+  grafana_data:
+COMPOSE
+
+cd /opt/monitoring
+docker compose up -d
+
+echo "DONE: Monitoring stack started"

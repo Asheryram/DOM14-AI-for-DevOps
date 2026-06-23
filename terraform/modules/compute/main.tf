@@ -1,17 +1,12 @@
-# ── Latest Amazon Linux 2023 AMI ──────────────────────────────────────────────
+# ── Latest Ubuntu 24.04 LTS AMI ──────────────────────────────────────────────
 
-data "aws_ami" "al2023" {
+data "aws_ami" "ubuntu" {
   most_recent = true
-  owners      = ["amazon"]
+  owners      = ["099720109477"] # Canonical
 
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
-  }
-
-  filter {
-    name   = "architecture"
-    values = ["x86_64"]
+    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
   }
 
   filter {
@@ -174,7 +169,7 @@ locals {
 
 resource "aws_launch_template" "app" {
   name_prefix   = "${var.name_prefix}-App-"
-  image_id      = data.aws_ami.al2023.id
+  image_id      = data.aws_ami.ubuntu.id
   instance_type = var.instance_type
 
   iam_instance_profile {
@@ -188,7 +183,7 @@ resource "aws_launch_template" "app" {
 
   metadata_options {
     http_tokens                 = "required"
-    http_put_response_hop_limit = 1
+    http_put_response_hop_limit = 2
   }
 
   key_name  = var.key_name != "" ? var.key_name : null

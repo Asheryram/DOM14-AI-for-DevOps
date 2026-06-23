@@ -14,6 +14,6 @@ output "security_group_id" {
 }
 
 output "ami_id" {
-  description = "Amazon Linux 2023 AMI used in the launch template"
-  value       = data.aws_ami.al2023.id
+  description = "Ubuntu AMI used in the launch template"
+  value       = data.aws_ami.ubuntu.id
 }

@@ -1,14 +1,19 @@
 #!/bin/bash
-set -euo pipefail
+exec > /var/log/cloud-init-output.log 2>&1
+
+# ── SSM Agent ─────────────────────────────────────────────────────────────────
+snap install amazon-ssm-agent --classic
+systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service
+systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service
 
 # ── System packages ───────────────────────────────────────────────────────────
-dnf update -y
-dnf install -y python3 python3-pip
+apt-get update -y
+apt-get install -y python3 python3-pip awscli
 
 # ── Python wheels from S3 (via VPC gateway endpoint — no internet needed) ─────
 mkdir -p /tmp/ts_wheels
 aws s3 sync "s3://${packages_bucket}/wheels/" /tmp/ts_wheels/ --region ${aws_region}
-pip3 install /tmp/ts_wheels/*.whl
+pip3 install /tmp/ts_wheels/*.whl --break-system-packages
 
 # ── Flask application ─────────────────────────────────────────────────────────
 mkdir -p /opt/techstream
@@ -38,3 +43,5 @@ APPSVC
 
 systemctl daemon-reload
 systemctl enable --now techstream
+
+echo "DONE: TechStream app started"

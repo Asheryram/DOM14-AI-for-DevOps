@@ -306,7 +306,7 @@ This takes **6–9 minutes**. Watch what Terraform creates in order:
 | 4th | `alarms` | SNS topic, 3 CloudWatch alarms (ErrorRate, CPU, Memory), email subscriptions |
 | 5th | `lambda` | Remediator Lambda, RCA Summariser Lambda, EventBridge rule, CloudWatch log groups |
 | 6th | `devops_guru` | DevOps Guru resource collection monitoring the CloudFormation stack |
-| 7th | `monitoring` | IAM role (EC2 service discovery), security group, t3.small EC2 instance, Elastic IP — user-data installs Prometheus + Grafana |
+| 7th | `monitoring` | IAM role (EC2 service discovery), security group, Ubuntu 24.04 t3.small EC2 instance, Elastic IP — user-data installs Docker and starts Prometheus + Grafana as containers |
 
 ### 4d — Save the outputs
 
@@ -344,9 +344,9 @@ Click **Confirm subscription** in each email.
 
 ## Task 5 — Wait for the Monitoring EC2 to Bootstrap
 
-The monitoring EC2 runs a user-data script that installs Prometheus and Grafana from
-scratch. This takes **3–5 minutes** after the instance reaches `running` state. You
-do not need to push any Docker image — everything installs automatically.
+The monitoring EC2 runs Ubuntu 24.04 with Docker. The user-data script installs
+Docker and starts Prometheus and Grafana as containers. This takes **4–6 minutes**
+after the instance reaches `running` state.
 
 ### 5a — Check instance status
 
@@ -367,36 +367,52 @@ aws ec2 describe-instance-status \
 }
 ```
 
-### 5b — Verify Prometheus is running
+### 5b — Verify SSM is online then check Docker containers
 
-Use SSM to check both services on the monitoring instance:
+First confirm SSM agent is registered (Ubuntu uses snap for SSM):
+
+```bash
+aws ssm describe-instance-information \
+  --filters "Key=InstanceIds,Values=$MONITORING_ID" \
+  --region eu-west-1 \
+  --query "InstanceInformationList[0].PingStatus" \
+  --output text
+```
+
+**Expected:** `Online`
+
+> If it returns `None`, wait 2 minutes and retry. Docker installation takes a few
+> minutes and SSM agent starts at the beginning of user-data.
+
+Once SSM is online, check that both containers are running:
 
 ```bash
 CMD_ID=$(aws ssm send-command \
   --instance-ids "$MONITORING_ID" \
   --document-name AWS-RunShellScript \
-  --parameters '{"commands":["systemctl is-active prometheus && systemctl is-active grafana-server"]}' \
+  --parameters '{"commands":["cd /opt/monitoring && docker compose ps"]}' \
   --region eu-west-1 \
   --query 'Command.CommandId' \
   --output text)
 
-echo "Command ID: $CMD_ID"
-sleep 10
+sleep 5
 
 aws ssm get-command-invocation \
   --command-id "$CMD_ID" \
   --instance-id "$MONITORING_ID" \
   --region eu-west-1 \
-  --query 'StandardOutputContent'
+  --query 'StandardOutputContent' \
+  --output text
 ```
 
 **Expected:**
 ```
-active
-active
+NAME                      IMAGE                     SERVICE      STATUS
+monitoring-grafana-1      grafana/grafana:10.4.2    grafana      Up X minutes
+monitoring-prometheus-1   prom/prometheus:v2.51.0   prometheus   Up X minutes
 ```
 
-If either service shows `inactive` or `failed`, check the user-data log:
+If containers are not running, check the user-data log:
 
 ```bash
 CMD_ID=$(aws ssm send-command \
@@ -407,13 +423,14 @@ CMD_ID=$(aws ssm send-command \
   --query 'Command.CommandId' \
   --output text)
 
-sleep 10
+sleep 5
 
 aws ssm get-command-invocation \
   --command-id "$CMD_ID" \
   --instance-id "$MONITORING_ID" \
   --region eu-west-1 \
-  --query 'StandardOutputContent'
+  --query 'StandardOutputContent' \
+  --output text
 ```
 
 ### 5c — Confirm Prometheus is discovering app instances
@@ -422,18 +439,19 @@ aws ssm get-command-invocation \
 CMD_ID=$(aws ssm send-command \
   --instance-ids "$MONITORING_ID" \
   --document-name AWS-RunShellScript \
-  --parameters '{"commands":["curl -s localhost:9090/api/v1/targets | python3 -m json.tool | grep -E '\"health\"|\"job\"' | head -10"]}' \
+  --parameters '{"commands":["curl -s localhost:9090/api/v1/targets | python3 -m json.tool | grep -E \"health\"|\"job\"" | head -10"]}' \
   --region eu-west-1 \
   --query 'Command.CommandId' \
   --output text)
 
-sleep 10
+sleep 5
 
 aws ssm get-command-invocation \
   --command-id "$CMD_ID" \
   --instance-id "$MONITORING_ID" \
   --region eu-west-1 \
-  --query 'StandardOutputContent'
+  --query 'StandardOutputContent' \
+  --output text
 ```
 
 **Expected:** two targets with `"health": "up"` and `"job": "techstream_app"`.
@@ -530,16 +548,18 @@ aws events describe-rule \
 ```bash
 aws lambda list-functions \
   --region eu-west-1 \
-  --query 'Functions[?starts_with(FunctionName, `TechStream`)].{Name:FunctionName,State:State}'
+  --query 'Functions[?starts_with(FunctionName, `TechStream`)].FunctionName'
 ```
 
 **Expected:**
 ```json
 [
-  {"Name": "TechStream-prod-Remediator",    "State": "Active"},
-  {"Name": "TechStream-prod-RCASummariser", "State": "Active"}
+  "TechStream-prod-Remediator",
+  "TechStream-prod-RCASummariser"
 ]
 ```
+
+> `list-functions` does not expose a `State` field — that is only returned by `get-function`. Seeing both function names in the list confirms they are deployed.
 
 ### 6.6 — Grafana is reachable
 
@@ -932,7 +952,7 @@ Takes about 5 minutes.
 
 ## Troubleshooting
 
-### Monitoring EC2 services not starting
+### Monitoring EC2 containers not starting
 
 ```bash
 MONITORING_ID=$(terraform output -raw monitoring_instance_id)
@@ -946,20 +966,21 @@ CMD_ID=$(aws ssm send-command \
   --query 'Command.CommandId' \
   --output text)
 
-sleep 10
+sleep 5
 
 aws ssm get-command-invocation \
   --command-id "$CMD_ID" \
   --instance-id "$MONITORING_ID" \
   --region eu-west-1 \
-  --query 'StandardOutputContent'
+  --query 'StandardOutputContent' \
+  --output text
 ```
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| `prometheus` inactive | Binary download failed (network timeout) | Monitoring EC2 is in the public subnet — check Security Group allows outbound 443 |
-| `grafana-server` inactive | RPM install failed | Check if `https://dl.grafana.com` is reachable from the monitoring instance |
-| Prometheus targets all `down` | App instances still bootstrapping | Wait 3–5 minutes; app user-data syncs wheels from S3 then starts Flask |
+| Containers not in `docker compose ps` | Docker install failed or still running | Check cloud-init log; user-data takes 4–6 minutes on first boot |
+| Prometheus container up but targets `down` | App instances still bootstrapping | Wait 3–5 minutes; app user-data syncs wheels from S3 then starts Flask |
+| SSM `None` after 10 minutes | snap install of SSM agent failed | Check cloud-init log for snap errors |
 
 ### `pip3 download` fails during `terraform apply`
 
@@ -1088,7 +1109,7 @@ aws logs tail /aws/lambda/TechStream-prod-RCASummariser \
 [ ] Task 3  — terraform.tfvars filled in with real email and password
 [ ] Task 4  — terraform apply completed; all 7 modules green; outputs saved
 [ ] Task 4e — SNS subscription confirmation emails clicked
-[ ] Task 5  — Monitoring EC2 bootstrap complete; prometheus and grafana-server both active
+[ ] Task 5  — Monitoring EC2 bootstrap complete; both Docker containers Up
 [ ] Task 5  — Prometheus EC2 SD showing 2 targets UP
 [ ] Task 6  — All 6 component checks pass (EC2 InService, Flask healthy, alarms OK)
 [ ] Task 7  — Grafana dashboard open and showing live data; Prometheus datasource green

@@ -3,24 +3,19 @@ locals {
     aws_region             = var.aws_region
     asg_name               = var.asg_name
     grafana_admin_password = var.grafana_admin_password
-    dashboard_json_b64     = base64encode(file("${path.module}/../../../monitoring/grafana/dashboards/techstream_golden_signals.json"))
+    dashboard_json         = file("${path.module}/../../../monitoring/grafana/dashboards/techstream_golden_signals.json")
   }))
 }
 
-# ── Latest Amazon Linux 2023 AMI ──────────────────────────────────────────────
+# ── Latest Ubuntu 24.04 LTS AMI ──────────────────────────────────────────────
 
-data "aws_ami" "al2023" {
+data "aws_ami" "ubuntu" {
   most_recent = true
-  owners      = ["amazon"]
+  owners      = ["099720109477"] # Canonical
 
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
-  }
-
-  filter {
-    name   = "architecture"
-    values = ["x86_64"]
+    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
   }
 
   filter {
@@ -118,7 +113,7 @@ resource "aws_security_group" "monitoring" {
 # ── EC2 instance ──────────────────────────────────────────────────────────────
 
 resource "aws_instance" "monitoring" {
-  ami                    = data.aws_ami.al2023.id
+  ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
   subnet_id              = var.subnet_id
   vpc_security_group_ids = [aws_security_group.monitoring.id]
@@ -128,7 +123,7 @@ resource "aws_instance" "monitoring" {
 
   metadata_options {
     http_tokens                 = "required"
-    http_put_response_hop_limit = 1
+    http_put_response_hop_limit = 2
   }
 
   tags = {
