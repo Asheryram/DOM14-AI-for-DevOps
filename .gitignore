@@ -23,15 +23,23 @@ dist/
 .idea/
 
 # Terraform
-*.tfstate
-*.tfstate.backup
-.terraform/
+**/*.tfstate
+**/*.tfstate.backup
+**/.terraform/
+**/.terraform.lock.hcl
 crash.log
 override.tf
 override.tf.json
 *.tfvars
 *.tfvars.json
+!*.tfvars.example
 tfplan
+**/tfplan
+
+# Build artifacts
+.build/
+*.zip
+
 # Logs
 *.log
 
@@ -40,3 +48,4 @@ tfplan
 
 # Misc
 *.pem
+*.key
