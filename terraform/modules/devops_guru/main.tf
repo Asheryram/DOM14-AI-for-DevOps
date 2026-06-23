@@ -1,7 +1,7 @@
 resource "aws_devopsguru_resource_collection" "this" {
   type = "AWS_CLOUD_FORMATION"
 
-  cloud_formation {
+  cloudformation {
     stack_names = [var.stack_name]
   }
 }

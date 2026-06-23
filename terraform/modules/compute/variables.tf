@@ -25,18 +25,8 @@ variable "key_name" {
   default     = ""
 }
 
-variable "ec2_remote_write_policy_arn" {
-  description = "ARN of the IAM policy that allows Prometheus to remote_write to AMP"
-  type        = string
-}
-
-variable "amp_ssm_parameter_name" {
-  description = "SSM parameter name that holds the AMP remote_write URL"
-  type        = string
-}
-
 variable "aws_region" {
   description = "AWS region"
   type        = string
-  default     = "us-east-1"
+  default     = "eu-west-1"
 }

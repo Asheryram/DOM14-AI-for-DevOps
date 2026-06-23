@@ -1,137 +1,110 @@
 locals {
-  grafana_image = var.grafana_image_uri != "" ? var.grafana_image_uri : "${aws_ecr_repository.grafana.repository_url}:latest"
+  user_data = base64encode(templatefile("${path.module}/monitoring_user_data.sh.tpl", {
+    aws_region             = var.aws_region
+    asg_name               = var.asg_name
+    grafana_admin_password = var.grafana_admin_password
+    dashboard_json_b64     = base64encode(file("${path.module}/../../../monitoring/grafana/dashboards/techstream_golden_signals.json"))
+  }))
 }
 
-# ── ECR repository for the custom Grafana image ───────────────────────────────
+# ── Latest Amazon Linux 2023 AMI ──────────────────────────────────────────────
 
-resource "aws_ecr_repository" "grafana" {
-  name                 = lower("${var.name_prefix}-grafana")
-  image_tag_mutability = "MUTABLE"
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["amazon"]
 
-  image_scanning_configuration {
-    scan_on_push = true
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
   }
 }
 
-resource "aws_ecr_lifecycle_policy" "grafana" {
-  repository = aws_ecr_repository.grafana.name
-  policy = jsonencode({
-    rules = [{
-      rulePriority = 1
-      description  = "Keep last 5 images"
-      selection = {
-        tagStatus   = "any"
-        countType   = "imageCountMoreThan"
-        countNumber = 5
-      }
-      action = { type = "expire" }
-    }]
-  })
-}
+# ── IAM role for Prometheus EC2 service discovery ─────────────────────────────
 
-# ── IAM: ECS task execution role (pull image + write logs) ────────────────────
-
-data "aws_iam_policy_document" "ecs_assume" {
+data "aws_iam_policy_document" "ec2_assume" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
       type        = "Service"
-      identifiers = ["ecs-tasks.amazonaws.com"]
+      identifiers = ["ec2.amazonaws.com"]
     }
   }
 }
 
-resource "aws_iam_role" "task_exec" {
-  name               = "${var.name_prefix}-GrafanaExecRole"
-  assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
+resource "aws_iam_role" "monitoring" {
+  name               = "${var.name_prefix}-MonitoringInstanceRole"
+  assume_role_policy = data.aws_iam_policy_document.ec2_assume.json
 }
 
-resource "aws_iam_role_policy_attachment" "task_exec" {
-  role       = aws_iam_role.task_exec.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+resource "aws_iam_role_policy_attachment" "ssm" {
+  role       = aws_iam_role.monitoring.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-# ── IAM: ECS task role (AMP query + CloudWatch read) ─────────────────────────
-
-resource "aws_iam_role" "task" {
-  name               = "${var.name_prefix}-GrafanaTaskRole"
-  assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
-}
-
-data "aws_iam_policy_document" "task" {
+data "aws_iam_policy_document" "ec2_sd" {
   statement {
-    sid = "AMPQuery"
+    sid = "PrometheusEC2SD"
     actions = [
-      "aps:QueryMetrics",
-      "aps:GetSeries",
-      "aps:GetLabels",
-      "aps:GetMetricMetadata",
-    ]
-    resources = [var.amp_workspace_arn]
-  }
-
-  statement {
-    sid = "CloudWatchRead"
-    actions = [
-      "cloudwatch:DescribeAlarmsForMetric",
-      "cloudwatch:DescribeAlarmHistory",
-      "cloudwatch:DescribeAlarms",
-      "cloudwatch:ListMetrics",
-      "cloudwatch:GetMetricData",
-      "cloudwatch:GetInsightRuleReport",
-      "logs:DescribeLogGroups",
-      "logs:GetLogGroupFields",
-      "logs:StartQuery",
-      "logs:StopQuery",
-      "logs:GetQueryResults",
-      "logs:GetLogEvents",
+      "ec2:DescribeInstances",
+      "ec2:DescribeAvailabilityZones",
     ]
     resources = ["*"]
   }
 }
 
-resource "aws_iam_policy" "task" {
-  name   = "${var.name_prefix}-GrafanaTaskPolicy"
-  policy = data.aws_iam_policy_document.task.json
+resource "aws_iam_role_policy" "ec2_sd" {
+  name   = "PrometheusEC2ServiceDiscovery"
+  role   = aws_iam_role.monitoring.id
+  policy = data.aws_iam_policy_document.ec2_sd.json
 }
 
-resource "aws_iam_role_policy_attachment" "task" {
-  role       = aws_iam_role.task.name
-  policy_arn = aws_iam_policy.task.arn
+resource "aws_iam_instance_profile" "monitoring" {
+  name = "${var.name_prefix}-MonitoringInstanceProfile"
+  role = aws_iam_role.monitoring.name
 }
 
-# ── Security groups ───────────────────────────────────────────────────────────
+# ── Security group ────────────────────────────────────────────────────────────
 
-resource "aws_security_group" "alb" {
-  name        = "${var.name_prefix}-Grafana-ALB"
-  description = "Allow HTTP inbound to Grafana ALB"
+resource "aws_security_group" "monitoring" {
+  name        = "${var.name_prefix}-Monitoring"
+  description = "Grafana (public) and Prometheus (VPC-internal)"
   vpc_id      = var.vpc_id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
+    description = "Grafana UI"
+    from_port   = 3000
+    to_port     = 3000
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
-resource "aws_security_group" "ecs" {
-  name        = "${var.name_prefix}-Grafana-ECS"
-  description = "Allow Grafana port from ALB"
-  vpc_id      = var.vpc_id
-
   ingress {
-    from_port       = 3000
-    to_port         = 3000
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
+    description = "Prometheus UI (VPC only)"
+    from_port   = 9090
+    to_port     = 9090
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  dynamic "ingress" {
+    for_each = var.key_name != "" ? [1] : []
+    content {
+      description = "SSH"
+      from_port   = 22
+      to_port     = 22
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
   }
 
   egress {
@@ -142,115 +115,35 @@ resource "aws_security_group" "ecs" {
   }
 }
 
-# ── Application Load Balancer ─────────────────────────────────────────────────
+# ── EC2 instance ──────────────────────────────────────────────────────────────
 
-resource "aws_lb" "grafana" {
-  name               = "${var.name_prefix}-Grafana"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = var.subnet_ids
-}
+resource "aws_instance" "monitoring" {
+  ami                    = data.aws_ami.al2023.id
+  instance_type          = var.instance_type
+  subnet_id              = var.subnet_id
+  vpc_security_group_ids = [aws_security_group.monitoring.id]
+  iam_instance_profile   = aws_iam_instance_profile.monitoring.name
+  key_name               = var.key_name != "" ? var.key_name : null
+  user_data_base64       = local.user_data
 
-resource "aws_lb_target_group" "grafana" {
-  name        = "${var.name_prefix}-Grafana"
-  port        = 3000
-  protocol    = "HTTP"
-  vpc_id      = var.vpc_id
-  target_type = "ip"
+  metadata_options {
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
 
-  health_check {
-    path                = "/api/health"
-    healthy_threshold   = 2
-    unhealthy_threshold = 3
-    interval            = 30
+  tags = {
+    Name = "${var.name_prefix}-Monitoring"
+    Role = "TechStream-Monitoring"
   }
 }
 
-resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.grafana.arn
-  port              = 80
-  protocol          = "HTTP"
+# ── Elastic IP (stable Grafana URL that survives stop/start) ──────────────────
 
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.grafana.arn
-  }
-}
+resource "aws_eip" "monitoring" {
+  instance = aws_instance.monitoring.id
+  domain   = "vpc"
 
-# ── ECS cluster + task definition + service ───────────────────────────────────
-
-resource "aws_ecs_cluster" "this" {
-  name = "${var.name_prefix}-Monitoring"
-
-  setting {
-    name  = "containerInsights"
-    value = "enabled"
-  }
-}
-
-resource "aws_cloudwatch_log_group" "grafana" {
-  name              = "/ecs/${var.name_prefix}-Grafana"
-  retention_in_days = 30
-}
-
-resource "aws_ecs_task_definition" "grafana" {
-  family                   = "${var.name_prefix}-Grafana"
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = var.grafana_task_cpu
-  memory                   = var.grafana_task_memory
-  execution_role_arn       = aws_iam_role.task_exec.arn
-  task_role_arn            = aws_iam_role.task.arn
-
-  container_definitions = jsonencode([{
-    name      = "grafana"
-    image     = local.grafana_image
-    essential = true
-
-    portMappings = [{ containerPort = 3000, protocol = "tcp" }]
-
-    environment = [
-      { name = "AWS_REGION", value = var.aws_region },
-      { name = "AMP_ENDPOINT", value = var.amp_endpoint },
-      { name = "GF_SECURITY_ADMIN_PASSWORD", value = var.grafana_admin_password },
-      { name = "GF_SERVER_ROOT_URL", value = "http://${aws_lb.grafana.dns_name}" },
-      { name = "GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH", value = "/var/lib/grafana/dashboards/techstream_golden_signals.json" },
-    ]
-
-    logConfiguration = {
-      logDriver = "awslogs"
-      options = {
-        awslogs-group         = aws_cloudwatch_log_group.grafana.name
-        awslogs-region        = var.aws_region
-        awslogs-stream-prefix = "grafana"
-      }
-    }
-  }])
-}
-
-resource "aws_ecs_service" "grafana" {
-  name            = "${var.name_prefix}-Grafana"
-  cluster         = aws_ecs_cluster.this.id
-  task_definition = aws_ecs_task_definition.grafana.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    subnets          = var.subnet_ids
-    security_groups  = [aws_security_group.ecs.id]
-    assign_public_ip = true
-  }
-
-  load_balancer {
-    target_group_arn = aws_lb_target_group.grafana.arn
-    container_name   = "grafana"
-    container_port   = 3000
-  }
-
-  depends_on = [aws_lb_listener.http]
-
-  lifecycle {
-    ignore_changes = [task_definition]
+  tags = {
+    Name = "${var.name_prefix}-Monitoring-EIP"
   }
 }

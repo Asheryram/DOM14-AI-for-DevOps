@@ -89,10 +89,9 @@ resource "aws_lambda_function" "remediator" {
 
   environment {
     variables = {
-      ASG_NAME   = var.asg_name
-      SES_FROM   = var.ses_from
-      SES_TO     = var.ses_to
-      AWS_REGION = var.aws_region
+      ASG_NAME = var.asg_name
+      SES_FROM = var.ses_from
+      SES_TO   = var.ses_to
     }
   }
 

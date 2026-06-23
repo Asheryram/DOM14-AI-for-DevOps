@@ -1,364 +1,508 @@
-# TechStream Self-Healing System — Full Walkthrough
+# TechStream Self-Healing System — Lab Guide
 
-> Follow this document top-to-bottom on a clean AWS account to go from zero to a
-> running, self-healing system. Every command is copy-pasteable.
-
----
-
-## Table of Contents
-
-1. [What You Are Building](#1-what-you-are-building)
-2. [Prerequisites](#2-prerequisites)
-3. [AWS One-Time Setup](#3-aws-one-time-setup)
-4. [Configure Terraform](#4-configure-terraform)
-5. [Deploy Infrastructure](#5-deploy-infrastructure)
-6. [Build and Push the Grafana Image](#6-build-and-push-the-grafana-image)
-7. [Verify Every Component](#7-verify-every-component)
-8. [Explore the Grafana Dashboard](#8-explore-the-grafana-dashboard)
-9. [Run a Chaos Scenario](#9-run-a-chaos-scenario)
-10. [Watch Self-Healing in Real Time](#10-watch-self-healing-in-real-time)
-11. [Read the AI Root-Cause Analysis Email](#11-read-the-ai-root-cause-analysis-email)
-12. [Automated Healing Verification](#12-automated-healing-verification)
-13. [Tear Down](#13-tear-down)
-14. [Troubleshooting](#14-troubleshooting)
+**Duration:** 90–120 minutes  
+**Level:** Intermediate AWS / DevOps
 
 ---
 
-## 1. What You Are Building
+## Lab Objectives
 
-```
-Browser ──► ALB ──► Grafana (ECS Fargate)
-                         └──► AMP (PromQL)
+By the end of this lab you will have:
 
-chaos.py ──► Flask app (EC2 ASG, private subnet)
-                  ├──► Prometheus ──► AMP (remote_write)
-                  └──► CloudWatch (5xx_error_rate)
-                              └──► CW Alarm
-                                       ├──► EventBridge ──► Remediator Lambda
-                                       │                         ├──► SSM (restart)
-                                       │                         └──► ASG (scale-out)
-                                       └──► SNS
-                                                └──► RCA Lambda ──► Bedrock ──► SES ──► email
-```
-
-**Self-healing loop:**
-`Fault injected → Error rate spikes → CW Alarm fires → EventBridge triggers Lambda
-→ Lambda restarts Flask or scales ASG → Error rate recovers → Bedrock emails RCA`
-
-The entire loop runs without any human action.
+- Deployed a fully automated self-healing pipeline on AWS using Terraform
+- Visualised the four Golden Signals in a self-hosted Grafana instance backed by Prometheus
+- Observed Prometheus discovering app instances automatically via EC2 service discovery
+- Injected real faults using a chaos engineering script and watched alarms fire
+- Observed an EventBridge rule trigger a Lambda that restarts the service automatically
+- Received an AI-generated root-cause analysis email produced by Amazon Bedrock
+- Confirmed system recovery using an automated verification script
 
 ---
 
-## 2. Prerequisites
+## Architecture at a Glance
 
-### Local tools
-
-| Tool | Minimum version | Install |
-|------|----------------|---------|
-| AWS CLI | v2 | https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html |
-| Terraform | 1.5 | https://developer.hashicorp.com/terraform/install |
-| Docker Desktop | 24 | https://www.docker.com/products/docker-desktop/ |
-| Python | 3.11 | https://www.python.org/downloads/ |
-| Git | any | pre-installed on most systems |
-
-Confirm each is available:
-
-```bash
-aws --version
-terraform --version
-docker --version
-python3 --version
+```
+[Browser]                     [Developer]
+    │                              │
+    ▼                              ▼
+[Monitoring EC2 — Elastic IP]  [chaos.py] ──► [App ALB]
+  ├─ Grafana :3000                                │
+  └─ Prometheus :9090                             ▼
+       └── EC2 SD ──────────► [EC2 ASG — Flask :8000]
+                                        │
+                                        │ PutMetricData
+                                        ▼
+                                 [CloudWatch Alarm]
+                                  /             \
+                   EventBridge Rule            SNS Topic
+                         │                         │
+                         ▼                         ├──► on-call email
+                  [Remediator λ]                   │
+                    ├─► SSM restart       [RCA Summariser λ]
+                    └─► ASG scale-out          │
+                                               ├──► Bedrock (Claude)
+                                               └──► SES email ──► incidents inbox
 ```
 
-### Python dependencies for chaos scripts
+---
+
+## Prerequisites
+
+### Tools — install before the lab
+
+| Tool | Min version | Check |
+|------|-------------|-------|
+| AWS CLI v2 | 2.x | `aws --version` |
+| Terraform | 1.5 | `terraform --version` |
+| Python 3 | 3.11 | `python3 --version` |
+| Git | any | `git --version` |
+
+Install Python dependencies for the chaos scripts:
 
 ```bash
 pip3 install requests psutil boto3
 ```
 
-### AWS credentials
+> **`pip3` is also required during `terraform apply`.** A `null_resource` provisioner calls `pip3 download` on your local machine to fetch pre-built Linux wheels, then uploads them to a private S3 bucket. The app EC2 instances pull those wheels from S3 via the free VPC gateway endpoint — they never touch the internet. Confirm `pip3 --version` works in your shell before applying.
+>
+> On Windows: if `python3` triggers the Microsoft Store prompt, `pip3` is unaffected — the two aliases are separate. The `pip3 --version` check confirms it is working.
 
-Configure a profile with sufficient permissions (EC2, ECS, ECR, Lambda, CloudWatch,
-AMP, SSM, SES, Bedrock, DevOps Guru, IAM, VPC):
+### AWS account requirements
+
+- IAM user or role with broad permissions (EC2, Lambda, CloudWatch, SSM, SES, Bedrock, DevOps Guru, IAM, VPC)
+- Default region: **eu-west-1** (all services used are available here)
+- SES is in sandbox mode on new accounts — this is fine; you just need to verify the email addresses you will use
+
+---
+
+## Task 0 — Configure AWS Credentials
+
+Configure the AWS CLI to point at your account:
 
 ```bash
 aws configure
-# AWS Access Key ID: <your key>
-# AWS Secret Access Key: <your secret>
-# Default region name: us-east-1
-# Default output format: json
 ```
 
-Verify access:
+Enter your Access Key ID, Secret Access Key, region (`eu-west-1`), and output format (`json`).
+
+Verify it works:
 
 ```bash
 aws sts get-caller-identity
 ```
 
+**Expected output:**
+```json
+{
+    "UserId": "AIDAXXXXXXXXXXXXXXXXX",
+    "Account": "123456789012",
+    "Arn": "arn:aws:iam::123456789012:user/your-user"
+}
+```
+
+> If this command fails, stop here and fix your credentials before continuing.
+
 ---
 
-## 3. AWS One-Time Setup
+## Task 1 — One-Time AWS Console Setup
 
-These are manual steps in the AWS console that must be done before Terraform runs.
+These two steps must be done in the AWS Console before Terraform runs.
+They cannot be automated because they require human verification.
 
-### 3.1 Verify email addresses in SES
+### 1a — Verify email addresses in SES
 
-The system sends email from three addresses. All three must be verified in SES.
+The system sends three types of email:
+- **From** address (SES requires this to be verified)
+- **On-call alerts** (SNS alarm notifications)
+- **Incidents inbox** (AI-generated RCA reports)
 
-```
-devops-guru@yourdomain.com   ← the FROM address (ses_from_email)
-oncall@yourdomain.com        ← on-call alerts (oncall_email)
-incidents@yourdomain.com     ← RCA reports (incidents_email)
-```
+For this lab you can use the **same real email address** for all three.
 
-You can use the same real email address for all three during a demo.
+Run these commands, replacing `you@example.com` with your actual email:
 
 ```bash
-# Verify each address (replace with your real email)
-aws ses verify-email-identity --email-address devops-guru@yourdomain.com --region us-east-1
-aws ses verify-email-identity --email-address oncall@yourdomain.com     --region us-east-1
-aws ses verify-email-identity --email-address incidents@yourdomain.com  --region us-east-1
+aws ses verify-email-identity \
+  --email-address you@example.com \
+  --region eu-west-1
 ```
 
-Check your inbox for three verification emails from AWS and click each link.
+Check your inbox. You will receive an email from AWS with the subject  
+**"Amazon Web Services – Email Address Verification Request"**.  
+Click the verification link inside it.
 
-> **SES sandbox**: New AWS accounts are in the SES sandbox, which means you can only
-> send to verified addresses. The demo works fine as long as all three addresses above
-> are verified. To remove the sandbox restriction, submit a production access request
-> in the SES console — but this is not required for the walkthrough.
+Confirm verification worked:
 
-### 3.2 Enable Bedrock model access
+```bash
+aws ses list-identities --identity-type EmailAddress --region eu-west-1
+```
 
-1. Open the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock)
-2. Navigate to **Model access** (left sidebar)
-3. Click **Manage model access**
-4. Tick **Claude Sonnet** (Anthropic)
-5. Click **Request model access** → wait for status to show **Access granted**
+**Expected:** your email address appears in the `Identities` list.
 
-### 3.3 Confirm your region supports all services
+### 1b — Confirm Bedrock access for Claude Sonnet
 
-This walkthrough uses `us-east-1`. All required services (AMP, DevOps Guru, Bedrock
-with Claude, ECS Fargate, ECR) are available there. If you use a different region,
-verify AMP and DevOps Guru availability first.
+AWS no longer requires manual model activation — Bedrock foundation models are enabled automatically on first invocation. However, **Anthropic models require a one-time use-case submission** for first-time accounts before they will respond.
+
+Verify access now by invoking the model directly from the CLI:
+
+```bash
+aws bedrock-runtime invoke-model \
+  --region eu-west-1 \
+  --model-id anthropic.claude-sonnet-4-6 \
+  --body '{"anthropic_version":"bedrock-2023-05-31","max_tokens":10,"messages":[{"role":"user","content":"ping"}]}' \
+  --cli-binary-format raw-in-base64-out \
+  /tmp/bedrock_test.json && echo "Access OK"
+```
+
+**Expected:** `Access OK` printed and `/tmp/bedrock_test.json` contains a short JSON response.
+
+If you see `AccessDeniedException` referencing a **service control policy**, Bedrock has been blocked at the AWS Organizations level (common on DCE/sandbox accounts). You cannot override this from within the account.
+
+**The lab still works.** The RCA Summariser Lambda catches the Bedrock failure and falls back to extracting data directly from the raw DevOps Guru insight — you will still receive the RCA email, just without the AI-generated narrative. The email includes a yellow banner indicating Bedrock was unavailable.
+
+If you see `AccessDeniedException` without an SCP reference (first-time Anthropic account):
+
+1. Open the [Bedrock Model Catalog](https://console.aws.amazon.com/bedrock/home?region=eu-west-1#/models) in the AWS Console
+2. Search for **Claude Sonnet**, click on the model, then click **Open in playground**
+3. Complete the one-time use-case form, then re-run the CLI command above
+
+> If Bedrock is SCP-blocked, skip ahead to Task 2. Task 10 will note the difference in the email you receive.
 
 ---
 
-## 4. Configure Terraform
+## Task 2 — Explore the Repository
+
+Before deploying anything, spend 5 minutes understanding what you are deploying.
+
+```
+terraform/
+  main.tf                 ← wires all 7 child modules together
+  variables.tf            ← every input the system accepts
+  outputs.tf              ← URLs and ARNs printed after apply
+  terraform.tfvars.example← template — you will copy and fill this in
+  modules/
+    vpc/           ← VPC, subnets, IGW, VPC endpoints (S3 gateway + SSM/CloudWatch interface)
+    compute/       ← EC2 launch template + IAM role + user-data (Flask app)
+    asg/           ← Auto Scaling Group (min 2, max 10)
+    alarms/        ← SNS topic + 3 CloudWatch alarms
+    lambda/        ← Remediator + RCA Summariser + EventBridge rule
+    devops_guru/   ← registers the stack with Amazon DevOps Guru
+    monitoring/    ← EC2 + Elastic IP running Prometheus + Grafana
+
+lambda/
+  remediator/handler.py      ← decides: restart or scale out
+  rca_summariser/handler.py  ← calls Bedrock, sends HTML email
+
+app/
+  app.py                     ← Flask ingestion API with Prometheus metrics
+  requirements.txt           ← pip dependencies
+
+monitoring/
+  grafana/dashboards/
+    techstream_golden_signals.json ← the 6-panel Golden Signals dashboard
+
+chaos/
+  chaos.py          ← 3 fault injection scenarios
+  verify_healing.sh ← automated before/after verification
+```
+
+**Key files to skim before continuing:**
+
+Open [lambda/remediator/handler.py](../lambda/remediator/handler.py) and note:
+- `_parse_alarm_name(event)` — handles both EventBridge and SNS event formats
+- The decision logic: if `in_service < desired` → scale out; otherwise → SSM restart
+
+Open [app/app.py](../app/app.py) and note:
+- `techstream_request_latency_seconds` (Histogram) and `techstream_request_total` (Counter) — Prometheus metrics exposed at `:8000/metrics`
+- Background thread that publishes `5xx_error_rate` to CloudWatch every 60 seconds — this is what drives the CloudWatch alarm
+
+Open [chaos/chaos.py](../chaos/chaos.py) and note:
+- `scenario_http_500` — floods `/api/v1/ingest` with 50 concurrent malformed POSTs/sec
+- `scenario_cpu_spike` — pegs all CPUs using multiprocessing busy loops
+- `scenario_memory_leak` — allocates 10 MB chunks until memory threshold is reached
+
+---
+
+## Task 3 — Configure Terraform
+
+Copy the example variables file:
 
 ```bash
 cd terraform
 cp terraform.tfvars.example terraform.tfvars
 ```
 
-Open `terraform.tfvars` and fill in the values below. Every other field has a
-working default you can leave unchanged.
+Open `terraform.tfvars` in your editor. Fill in **every field marked below**:
 
 ```hcl
-# ── Required: your region ─────────────────────────────────────────────────────
-aws_region  = "us-east-1"
-environment = "prod"
+# ── Region ────────────────────────────────────────────────────────────────────
+aws_region  = "eu-west-1"      # ← keep this
+environment = "prod"           # ← keep this
 
-# ── Required: email addresses (must be SES-verified, see step 3.1) ───────────
-oncall_email    = "you@yourdomain.com"
-incidents_email = "you@yourdomain.com"
-ses_from_email  = "you@yourdomain.com"
+# ── Networking — Terraform creates the VPC, you don't touch these ─────────────
+vpc_cidr = "10.0.0.0/16"
 
-# ── Required: Grafana login password ─────────────────────────────────────────
-grafana_admin_password = "MySecure#Password1"
+# ── Compute ───────────────────────────────────────────────────────────────────
+instance_type = "t3.medium"
+key_name      = ""             # leave empty — SSH not needed for this lab
 
-# ── Optional: keep defaults unless you have a reason to change ───────────────
-vpc_cidr              = "10.0.0.0/16"
-instance_type         = "t3.medium"
-key_name              = ""                # leave empty — SSH not needed
-asg_min_size          = 2
-asg_max_size          = 10
-asg_desired_capacity  = 2
-bedrock_model_id      = "us.anthropic.claude-sonnet-4-6-20251001-v1:0"
+# ── Auto Scaling ──────────────────────────────────────────────────────────────
+asg_min_size         = 2
+asg_max_size         = 10
+asg_desired_capacity = 2
+
+# ── Email addresses — REPLACE THESE WITH YOUR VERIFIED SES EMAIL ──────────────
+oncall_email    = "you@example.com"    # ← CHANGE THIS
+incidents_email = "you@example.com"    # ← CHANGE THIS (can be same address)
+ses_from_email  = "you@example.com"    # ← CHANGE THIS (can be same address)
+
+# ── Bedrock ───────────────────────────────────────────────────────────────────
+bedrock_model_id = "anthropic.claude-sonnet-4-6"
+
+# ── DevOps Guru ───────────────────────────────────────────────────────────────
 cloudformation_stack_name = "TechStream-Prod"
+
+# ── Grafana — CHANGE THE PASSWORD ─────────────────────────────────────────────
+grafana_admin_password = "YourStrongPassword1!"   # ← CHANGE THIS
 ```
 
-> `terraform.tfvars` is gitignored. Never commit it — it contains your Grafana password.
+> `terraform.tfvars` is gitignored. Never commit it — it holds your Grafana password.
 
 ---
 
-## 5. Deploy Infrastructure
+## Task 4 — Deploy Infrastructure with Terraform
+
+### 4a — Initialise
 
 ```bash
-# Still inside terraform/
 terraform init
 ```
 
-Expected output:
+**Expected output (last line):**
 ```
 Terraform has been successfully initialized!
 ```
+
+### 4b — Review the plan
 
 ```bash
 terraform plan -out=tfplan
 ```
 
-Review the plan. You should see resources being created across all 8 modules.
-No resources should be destroyed on a fresh account.
+Scroll through the plan. You should see **~55–60 resources** being created across 7 modules with no destroys. If you see any errors here, fix them before applying.
+
+### 4c — Apply
 
 ```bash
 terraform apply tfplan
 ```
 
-This takes approximately **4–6 minutes**. Terraform creates resources in this order:
+This takes **6–9 minutes**. Watch what Terraform creates in order:
 
-| Step | Module | What happens |
-|------|--------|-------------|
-| 1 | `vpc` | VPC, 2 public subnets, 2 private subnets, IGW, NAT GW, route tables |
-| 2 | `amp` | AMP workspace created; remote_write URL stored in SSM Parameter Store |
-| 3 | `compute` | AL2023 AMI looked up; security group, IAM role, launch template created |
-| 4 | `asg` | ASG created; EC2 instances launch in private subnets and bootstrap via user-data |
-| 5 | `alarms` | SNS topic created; 3 CloudWatch alarms defined; email subscriptions sent |
-| 6 | `lambda` | Lambda functions zipped and deployed; EventBridge rule created |
-| 7 | `devops_guru` | DevOps Guru starts monitoring the CloudFormation stack |
-| 8 | `monitoring` | ECR repo created; ECS cluster + ALB + task definition created (service stays PENDING until image is pushed) |
+| Order | Module | What is created |
+|-------|--------|----------------|
+| 1st | `vpc` | VPC `10.0.0.0/16`, 2 public + 2 private subnets, Internet Gateway, public/private route tables — **no NAT Gateway**; private subnets reach AWS services via VPC endpoints: S3 gateway (free), SSM × 3 interface endpoints, CloudWatch interface endpoint |
+| 2nd | `compute` | Private S3 bucket for Python wheels; `null_resource` runs `pip3 download` locally and uploads wheels to S3; security group for port 8000; IAM instance profile (with S3 read access); EC2 launch template |
+| 3rd | `asg` | Auto Scaling Group; 2 EC2 instances in **private** subnets launch and download wheels from S3 via VPC endpoint to start `techstream.service` |
+| 4th | `alarms` | SNS topic, 3 CloudWatch alarms (ErrorRate, CPU, Memory), email subscriptions |
+| 5th | `lambda` | Remediator Lambda, RCA Summariser Lambda, EventBridge rule, CloudWatch log groups |
+| 6th | `devops_guru` | DevOps Guru resource collection monitoring the CloudFormation stack |
+| 7th | `monitoring` | IAM role (EC2 service discovery), security group, t3.small EC2 instance, Elastic IP — user-data installs Prometheus + Grafana |
 
-When apply completes, copy the outputs to a notepad:
+### 4d — Save the outputs
+
+When apply finishes, Terraform prints the outputs. **Copy these to a notepad now** — you will need them throughout the lab:
 
 ```
-Outputs:
-
-grafana_url             = "http://techstream-prod-grafana-XXXXXXXXX.us-east-1.elb.amazonaws.com"
-ecr_repository_url      = "ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/techstream-prod-grafana"
-asg_name                = "TechStream-prod-ASG"
-sns_topic_arn           = "arn:aws:sns:us-east-1:ACCOUNT:TechStream-prod-Alerts"
-amp_remote_write_url    = "https://aps-workspaces.us-east-1.amazonaws.com/workspaces/ws-XXXX/api/v1/remote_write"
-amp_ssm_parameter       = "/TechStream-prod/amp/remote-write-url"
-remediator_function_arn = "arn:aws:lambda:us-east-1:ACCOUNT:function:TechStream-prod-Remediator"
-vpc_id                  = "vpc-XXXXXXXXX"
+grafana_url                = "http://54.X.X.X:3000"
+prometheus_url             = "http://54.X.X.X:9090"
+monitoring_instance_id     = "i-XXXXXXXXXXXXXXXXX"
+asg_name                   = "TechStream-prod-ASG"
+sns_topic_arn              = "arn:aws:sns:eu-west-1:123456789012:TechStream-prod-Alerts"
+remediator_function_arn    = "arn:aws:lambda:eu-west-1:123456789012:function:TechStream-prod-Remediator"
+vpc_id                     = "vpc-XXXXXXXXXXXXXXXXX"
 ```
 
-**Accept the SNS subscription emails** — check your inbox for two emails titled
-"AWS Notification - Subscription Confirmation" and click the confirmation link in each.
-If you skip this, email alerts will not be delivered.
+If you need to see the outputs again at any time:
+
+```bash
+terraform output
+```
+
+### 4e — Confirm SNS subscription emails
+
+Check your inbox now. You will have received **two emails** with subject  
+**"AWS Notification – Subscription Confirmation"** — one for the on-call address  
+and one for the incidents address.
+
+Click **Confirm subscription** in each email.
+
+> If you skip this, CloudWatch alarm notifications and DevOps Guru insights will be
+> dropped silently. The Lambda remediation via EventBridge still works — but you
+> will not receive the emails.
 
 ---
 
-## 6. Build and Push the Grafana Image
+## Task 5 — Wait for the Monitoring EC2 to Bootstrap
 
-The ECS service is waiting for a Docker image in ECR. Once pushed, the service
-starts within about 60 seconds.
+The monitoring EC2 runs a user-data script that installs Prometheus and Grafana from
+scratch. This takes **3–5 minutes** after the instance reaches `running` state. You
+do not need to push any Docker image — everything installs automatically.
 
-```bash
-# From the repo root (one level above terraform/)
-cd ..
-
-# Authenticate Docker to ECR
-aws ecr get-login-password --region us-east-1 \
-  | docker login --username AWS --password-stdin \
-    ACCOUNT.dkr.ecr.us-east-1.amazonaws.com
-```
-
-Expected: `Login Succeeded`
+### 5a — Check instance status
 
 ```bash
-# Build the custom Grafana image
-# (bakes datasource + dashboard provisioning YAML into the image)
-docker build \
-  -f monitoring/Dockerfile.grafana \
-  -t techstream-grafana \
-  .
+MONITORING_ID=$(terraform output -raw monitoring_instance_id)
+
+aws ec2 describe-instance-status \
+  --instance-ids "$MONITORING_ID" \
+  --region eu-west-1 \
+  --query 'InstanceStatuses[0].{Instance:InstanceStatus.Status,System:SystemStatus.Status}'
 ```
 
-```bash
-# Tag and push to ECR
-docker tag techstream-grafana \
-  ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/techstream-prod-grafana:latest
-
-docker push \
-  ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/techstream-prod-grafana:latest
-```
-
-After the push completes the ECS service detects the new image and starts.
-Wait about 90 seconds, then verify:
-
-```bash
-aws ecs describe-services \
-  --cluster TechStream-prod-grafana \
-  --services TechStream-prod-grafana \
-  --region us-east-1 \
-  --query 'services[0].{Status:status,Running:runningCount,Desired:desiredCount}'
-```
-
-Expected:
+**Expected (may take 2 minutes to reach this state):**
 ```json
 {
-    "Status": "ACTIVE",
-    "Running": 1,
-    "Desired": 1
+    "Instance": "ok",
+    "System": "ok"
 }
 ```
 
+### 5b — Verify Prometheus is running
+
+Use SSM to check both services on the monitoring instance:
+
+```bash
+CMD_ID=$(aws ssm send-command \
+  --instance-ids "$MONITORING_ID" \
+  --document-name AWS-RunShellScript \
+  --parameters '{"commands":["systemctl is-active prometheus && systemctl is-active grafana-server"]}' \
+  --region eu-west-1 \
+  --query 'Command.CommandId' \
+  --output text)
+
+echo "Command ID: $CMD_ID"
+sleep 10
+
+aws ssm get-command-invocation \
+  --command-id "$CMD_ID" \
+  --instance-id "$MONITORING_ID" \
+  --region eu-west-1 \
+  --query 'StandardOutputContent'
+```
+
+**Expected:**
+```
+active
+active
+```
+
+If either service shows `inactive` or `failed`, check the user-data log:
+
+```bash
+CMD_ID=$(aws ssm send-command \
+  --instance-ids "$MONITORING_ID" \
+  --document-name AWS-RunShellScript \
+  --parameters '{"commands":["tail -50 /var/log/cloud-init-output.log"]}' \
+  --region eu-west-1 \
+  --query 'Command.CommandId' \
+  --output text)
+
+sleep 10
+
+aws ssm get-command-invocation \
+  --command-id "$CMD_ID" \
+  --instance-id "$MONITORING_ID" \
+  --region eu-west-1 \
+  --query 'StandardOutputContent'
+```
+
+### 5c — Confirm Prometheus is discovering app instances
+
+```bash
+CMD_ID=$(aws ssm send-command \
+  --instance-ids "$MONITORING_ID" \
+  --document-name AWS-RunShellScript \
+  --parameters '{"commands":["curl -s localhost:9090/api/v1/targets | python3 -m json.tool | grep -E '\"health\"|\"job\"' | head -10"]}' \
+  --region eu-west-1 \
+  --query 'Command.CommandId' \
+  --output text)
+
+sleep 10
+
+aws ssm get-command-invocation \
+  --command-id "$CMD_ID" \
+  --instance-id "$MONITORING_ID" \
+  --region eu-west-1 \
+  --query 'StandardOutputContent'
+```
+
+**Expected:** two targets with `"health": "up"` and `"job": "techstream_app"`.
+
+> If targets show `"health": "down"`, the app EC2s may still be bootstrapping.
+> Wait 3 minutes and retry — user-data on app instances syncs wheels from S3 and
+> installs them before starting the Flask service.
+
 ---
 
-## 7. Verify Every Component
+## Task 6 — Verify All System Components
 
-Run these checks before proceeding to chaos. Each should return the expected value.
+Run each check in order. Do not proceed to chaos until all checks pass.
 
-### 7.1 EC2 instances are healthy
+### 6.1 — EC2 instances are InService
 
 ```bash
 aws autoscaling describe-auto-scaling-groups \
   --auto-scaling-group-names TechStream-prod-ASG \
-  --region us-east-1 \
+  --region eu-west-1 \
   --query 'AutoScalingGroups[0].Instances[*].{ID:InstanceId,State:LifecycleState,Health:HealthStatus}'
 ```
 
-Expected: two instances, both `InService` / `Healthy`.
+**Expected:** two entries, both `"LifecycleState": "InService"` and `"HealthStatus": "Healthy"`.
 
-### 7.2 Flask app is running on EC2
+Copy one instance ID (e.g. `i-0abc123def456`) — you will need it for the next check.
 
-The EC2 instances are in private subnets (no direct internet access). Check via SSM:
+### 6.2 — Flask app is running
+
+The EC2 instances are in private subnets. Use SSM to run commands on them:
 
 ```bash
-# Get one instance ID from the ASG output above, then:
-aws ssm send-command \
-  --instance-ids i-XXXXXXXXXXXXXXXXX \
+# Replace i-XXXXXXXXXXXXXXXXX with your actual instance ID
+INSTANCE_ID=i-XXXXXXXXXXXXXXXXX
+
+CMD_ID=$(aws ssm send-command \
+  --instance-ids "$INSTANCE_ID" \
   --document-name AWS-RunShellScript \
-  --parameters '{"commands":["systemctl is-active flask-app && curl -s localhost:8000/api/v1/health"]}' \
-  --region us-east-1 \
+  --parameters '{"commands":["systemctl is-active techstream && curl -s localhost:8000/api/v1/health"]}' \
+  --region eu-west-1 \
   --query 'Command.CommandId' \
-  --output text
-```
+  --output text)
 
-```bash
-# Wait 10 seconds, then retrieve output:
+echo "Command ID: $CMD_ID"
+sleep 10
+
 aws ssm get-command-invocation \
-  --command-id COMMAND_ID \
-  --instance-id i-XXXXXXXXXXXXXXXXX \
-  --region us-east-1 \
+  --command-id "$CMD_ID" \
+  --instance-id "$INSTANCE_ID" \
+  --region eu-west-1 \
   --query 'StandardOutputContent'
 ```
 
-Expected output includes `active` and `{"status": "healthy"}`.
-
-### 7.3 Prometheus is shipping to AMP
-
-```bash
-aws ssm send-command \
-  --instance-ids i-XXXXXXXXXXXXXXXXX \
-  --document-name AWS-RunShellScript \
-  --parameters '{"commands":["systemctl is-active prometheus && curl -s localhost:9090/api/v1/query?query=up"]}' \
-  --region us-east-1 \
-  --query 'Command.CommandId' --output text
+**Expected:**
+```
+active
+{"status": "healthy", "service": "TechStream"}
 ```
 
-Expected: `active` and a JSON response with `"status":"success"`.
-
-### 7.4 CloudWatch alarms are in OK state
+### 6.3 — CloudWatch alarms are in OK state
 
 ```bash
 aws cloudwatch describe-alarms \
   --alarm-name-prefix TechStream-prod \
-  --region us-east-1 \
+  --region eu-west-1 \
   --query 'MetricAlarms[*].{Alarm:AlarmName,State:StateValue}'
 ```
 
-Expected:
+**Expected:**
 ```json
 [
   {"Alarm": "TechStream-prod-ErrorRate-High", "State": "OK"},
@@ -367,158 +511,199 @@ Expected:
 ]
 ```
 
-> Alarms may show `INSUFFICIENT_DATA` for the first 5 minutes while CloudWatch
-> collects the first data points. Wait and re-run.
+> Alarms show `INSUFFICIENT_DATA` for the first 5–10 minutes while CloudWatch
+> collects the first data points. This is normal. Wait and re-run.
 
-### 7.5 EventBridge rule is enabled
+### 6.4 — EventBridge rule is active
 
 ```bash
 aws events describe-rule \
   --name TechStream-prod-AlarmToRemediation \
-  --region us-east-1 \
-  --query '{State:State,EventPattern:EventPattern}'
+  --region eu-west-1 \
+  --query '{State:State}'
 ```
 
-Expected: `"State": "ENABLED"`.
+**Expected:** `"State": "ENABLED"`
 
-### 7.6 Lambda functions exist and are active
+### 6.5 — Lambda functions are active
 
 ```bash
 aws lambda list-functions \
-  --region us-east-1 \
-  --query 'Functions[?starts_with(FunctionName,`TechStream`)].{Name:FunctionName,State:State}'
+  --region eu-west-1 \
+  --query 'Functions[?starts_with(FunctionName, `TechStream`)].{Name:FunctionName,State:State}'
 ```
 
-Expected:
+**Expected:**
 ```json
 [
-  {"Name": "TechStream-prod-Remediator",   "State": "Active"},
-  {"Name": "TechStream-prod-RCASummariser","State": "Active"}
+  {"Name": "TechStream-prod-Remediator",    "State": "Active"},
+  {"Name": "TechStream-prod-RCASummariser", "State": "Active"}
 ]
 ```
 
-### 7.7 Grafana is reachable
+### 6.6 — Grafana is reachable
 
 ```bash
-curl -s -o /dev/null -w "%{http_code}" \
-  http://techstream-prod-grafana-XXXXXXXXX.us-east-1.elb.amazonaws.com/api/health
+GRAFANA_URL=$(terraform output -raw grafana_url)
+
+curl -s -o /dev/null -w "HTTP status: %{http_code}\n" \
+  "$GRAFANA_URL/api/health"
 ```
 
-Expected: `200`
+**Expected:** `HTTP status: 200`
+
+> If you get `Connection refused`, Grafana is still starting. Wait 2 minutes and retry.
+> The Elastic IP is assigned immediately, but Grafana takes ~60 seconds to start after
+> the RPM installs.
 
 ---
 
-## 8. Explore the Grafana Dashboard
+## Task 7 — Explore the Grafana Dashboard
 
-1. Open the `grafana_url` in your browser
-2. Login: username `admin`, password = the value of `grafana_admin_password` in your tfvars
-3. Navigate to **Dashboards → TechStream Golden Signals**
+1. Open the `grafana_url` from your saved outputs in a browser (`http://<EIP>:3000`)
+2. Log in with username `admin` and the password you set in `terraform.tfvars`
+3. In the left sidebar click the **grid icon (Dashboards)**
+4. Open the **TechStream** folder → click **TechStream Golden Signals**
 
-You will see 6 panels updating every 15 seconds:
+You will see 6 panels refreshing every 15 seconds:
 
-| Panel | What it shows | Normal baseline |
-|-------|--------------|----------------|
-| Latency p50/p95/p99 | Request latency percentiles from AMP | p50 < 100 ms |
-| Traffic req/s | Requests per second by endpoint | Depends on load |
-| Error Rate % | 5xx percentage (stat, color-coded) | < 1 % (green) |
-| CPU Saturation | CPU % per instance (gauge) | < 30 % (green) |
-| Error Count by Status | Error breakdown by HTTP status | Near zero |
-| Memory % | Memory utilisation per instance | < 60 % (green) |
+| Panel | Source | What to look for at baseline |
+|-------|--------|------------------------------|
+| Latency — p50/p95/p99 | Prometheus | p50 < 100 ms, all lines flat and low |
+| Traffic — req/s | Prometheus | Low and steady (background health checks only) |
+| Error Rate % | Prometheus | Green — below 1 % |
+| CPU Saturation | Prometheus | Green gauge — below 30 % |
+| Error Count by Status | Prometheus | Near zero |
+| Memory % | Prometheus | Stable, below 60 % |
 
-Confirm the AMP datasource is connected: **Configuration → Data Sources → AMP → Save & Test** should return `Data source connected and labels found`.
+**Verify the Prometheus datasource:**
+- Click the gear icon → **Data Sources** → click **Prometheus** → scroll down → **Save & Test**
+- Should return: `Data source connected and labels found`
+
+**Keep this browser tab open** — you will watch it change during the chaos phase.
 
 ---
 
-## 9. Run a Chaos Scenario
+## Task 8 — Inject a Fault (http_500 scenario)
 
-> Run this from your laptop. The chaos script talks to the Flask app through the
-> internet (via ALB) or you can run it from a bastion host inside the VPC.
+This task runs the HTTP 500 flood scenario. The chaos script sends 50 concurrent
+malformed POST requests per second to the Flask app. Flask returns a 500 for every
+malformed payload, which drives the error rate above the 5 % alarm threshold.
 
-You need the DNS name of the **application** ALB — not the Grafana ALB.
-The app ALB is created by the `asg` module and forwards traffic on port 8000
-to the EC2 instances. Get it:
+### 8a — Get the application ALB DNS name
+
+```bash
+APP_ALB=$(aws elbv2 describe-load-balancers \
+  --region eu-west-1 \
+  --query 'LoadBalancers[?contains(LoadBalancerName, `TechStream-prod`)].DNSName' \
+  --output text)
+
+echo "App ALB: $APP_ALB"
+```
+
+If the above returns multiple results, list them and pick the app-facing one:
 
 ```bash
 aws elbv2 describe-load-balancers \
-  --region us-east-1 \
-  --query 'LoadBalancers[?contains(LoadBalancerName,`TechStream`)].DNSName' \
-  --output text
+  --region eu-west-1 \
+  --query 'LoadBalancers[*].{Name:LoadBalancerName,DNS:DNSName}'
 ```
 
-Run the HTTP 500 scenario for 3 minutes:
+### 8b — Open monitoring terminals
 
+Open **three terminal windows** before starting the chaos:
+
+**Terminal 1 — stream the remediation audit log:**
 ```bash
+aws logs tail /techstream/remediation-events \
+  --follow \
+  --region eu-west-1
+```
+This starts empty. An entry will appear the moment the Lambda fires.
+
+**Terminal 2 — watch alarm state (runs a check every 15 seconds):**
+```bash
+while true; do
+  echo -n "$(date -u +%H:%M:%S)  "
+  aws cloudwatch describe-alarms \
+    --alarm-name-prefix TechStream-prod-ErrorRate \
+    --region eu-west-1 \
+    --query 'MetricAlarms[0].StateValue' \
+    --output text
+  sleep 15
+done
+```
+
+**Terminal 3 — run the chaos:**
+```bash
+# Run from the repo root
 python3 chaos/chaos.py \
   --scenario http_500 \
-  --alb-dns techstream-prod-app-XXXXXXXXX.us-east-1.elb.amazonaws.com \
+  --alb-dns "$APP_ALB" \
   --duration 180 \
-  --region us-east-1
+  --region eu-west-1
 ```
 
-You will see live output:
-
+Live output from chaos.py:
 ```
 [http_500] elapsed=177s remaining  errors=412   total=415
 [http_500] elapsed=147s remaining  errors=1247  total=1252
 [http_500] elapsed=117s remaining  errors=2083  total=2090
-...
 ```
 
-**While the scenario runs**, watch the Grafana dashboard:
-- Error Rate % climbs from < 1 % → 40–50 % (panel turns red)
-- Traffic req/s spikes sharply
-- Latency may increase as Flask handles malformed payloads
+### 8c — Watch the Grafana dashboard change
 
-### Other scenarios
+Switch to your browser. Within 60 seconds of chaos starting:
 
-```bash
-# CPU saturation — fires the CPU alarm instead of ErrorRate
-python3 chaos/chaos.py --scenario cpu_spike --alb-dns <ALB_DNS> --duration 180
+- **Error Rate %** panel turns yellow, then red (crosses 5 %)
+- **Traffic req/s** spikes sharply upward
+- **Latency** may increase slightly as the app handles load
 
-# Memory pressure — fires the Memory alarm
-python3 chaos/chaos.py --scenario memory_leak --alb-dns <ALB_DNS> --duration 180
-
-# Network latency — visible on the Latency panel
-python3 chaos/chaos.py --scenario network_stress --alb-dns <ALB_DNS> --duration 180
-```
+Take note of the peak error rate. It will be in the 40–50 % range.
 
 ---
 
-## 10. Watch Self-Healing in Real Time
+## Task 9 — Observe Self-Healing
 
-Open two terminal windows.
+### What happens — the exact sequence
 
-**Terminal A — stream the remediation log:**
+**~T+2 minutes** — CloudWatch evaluates the alarm. Two consecutive 1-minute periods
+with error rate > 5 % causes the alarm to fire:
 
-```bash
-aws logs tail /techstream/remediation-events \
-  --follow \
-  --region us-east-1
+```
+Terminal 2:
+10:15:02  OK
+10:15:17  ALARM   ←── alarm fires here
 ```
 
-**Terminal B — watch the alarm state:**
+**~T+2 minutes + a few seconds** — EventBridge delivers the alarm state-change event
+to the Remediator Lambda. This is the primary remediation path — sub-second latency
+compared to SNS.
 
-```bash
-watch -n 10 "aws cloudwatch describe-alarms \
-  --alarm-name-prefix TechStream-prod \
-  --region us-east-1 \
-  --query 'MetricAlarms[*].{Alarm:AlarmName,State:StateValue}'"
+The Lambda runs its decision logic from [lambda/remediator/handler.py](../lambda/remediator/handler.py):
+
+```python
+if len(in_service_instances) < desired_capacity:
+    # Instance count is below desired — something crashed
+    asg.set_desired_capacity(DesiredCapacity=desired + 2)   # scale-out
+    action = 'scale_out'
+else:
+    # All instances healthy but service is misbehaving — restart it
+    ssm.send_command(
+        InstanceIds=instance_ids,
+        DocumentName='AWS-RunShellScript',
+        Parameters={'commands': ['sudo systemctl restart techstream && sleep 5 && systemctl is-active techstream']}
+    )
+    action = 'service_restart'
 ```
 
-### Timeline of what you will observe
+Since all 2 instances are InService, it takes the **restart** path.
 
-**~T+2 min after chaos starts**
-The error rate alarm changes state. Terminal B shows:
-```
-TechStream-prod-ErrorRate-High  →  ALARM
-```
-
-**~T+2 min (within seconds of ALARM)**
-EventBridge delivers the alarm event to the Remediator Lambda. Terminal A shows:
+**~T+2.5 minutes** — Terminal 1 shows the audit log entry:
 
 ```json
 {
-  "timestamp": "2026-06-22T10:15:32Z",
+  "timestamp": "2026-06-22T10:15:34Z",
   "alarm_name": "TechStream-prod-ErrorRate-High",
   "action_taken": "service_restart",
   "result": "success",
@@ -526,297 +711,392 @@ EventBridge delivers the alarm event to the Remediator Lambda. Terminal A shows:
 }
 ```
 
-**~T+2.5 min**
-SSM `send-command` executes on all InService EC2 instances:
-```
-sudo systemctl restart flask-app && sleep 5 && systemctl is-active flask-app
-```
-Flask restarts in ~5 seconds per instance.
+**~T+3 minutes** — Flask restarts on both instances (~5 seconds per instance via SSM).
+The 500 errors stop. CloudWatch evaluates two clean 1-minute periods.
 
-**~T+3 min**
-The error rate drops back below 1 %. The CloudWatch alarm transitions:
+**~T+4 minutes** — Alarm transitions back to OK:
+
 ```
-TechStream-prod-ErrorRate-High  →  OK
+Terminal 2:
+10:17:32  ALARM
+10:17:47  OK     ←── system healed
 ```
+
 The Grafana Error Rate panel turns green.
 
-**Check Lambda execution metrics:**
+### Confirm the Lambda was invoked
 
 ```bash
 aws cloudwatch get-metric-statistics \
   --namespace AWS/Lambda \
   --metric-name Invocations \
   --dimensions Name=FunctionName,Value=TechStream-prod-Remediator \
-  --start-time $(date -u -d '15 minutes ago' +%Y-%m-%dT%H:%M:%SZ) \
+  --start-time $(date -u -d '20 minutes ago' +%Y-%m-%dT%H:%M:%SZ) \
   --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
-  --period 900 --statistics Sum \
-  --region us-east-1 \
+  --period 1200 \
+  --statistics Sum \
+  --region eu-west-1 \
   --query 'Datapoints[0].Sum'
 ```
 
-Expected: `1.0` (one invocation for this chaos run).
+**Expected:** `1.0` — one Lambda invocation for this chaos run.
 
-**Check ASG scaling activity** (if scale-out was triggered instead of restart):
+### Confirm the SSM restart ran
 
 ```bash
-aws autoscaling describe-scaling-activities \
-  --auto-scaling-group-name TechStream-prod-ASG \
-  --region us-east-1 \
-  --max-items 5 \
-  --query 'Activities[*].{Time:StartTime,Description:Description,Status:StatusCode}'
+aws ssm list-command-invocations \
+  --region eu-west-1 \
+  --filter key=DocumentName,value=AWS-RunShellScript \
+  --query 'CommandInvocations[0].{Status:Status,InstanceId:InstanceId,Document:DocumentName}' \
+  --output json
 ```
+
+**Expected:** `"Status": "Success"`.
 
 ---
 
-## 11. Read the AI Root-Cause Analysis Email
+## Task 10 — Read the AI Root-Cause Analysis Email
 
-Amazon DevOps Guru analyses the anomaly pattern and publishes an insight to the SNS
-topic. The RCA Summariser Lambda is subscribed and fires within ~60 seconds of the
-insight arriving.
+Amazon DevOps Guru analyses the anomaly independently of the EventBridge/Lambda path.
+It correlates CloudWatch metrics, alarm history, and ASG events to generate a
+structured insight, then publishes it to the SNS topic.
 
-Check your `incidents_email` inbox for a message with subject:
+The **RCA Summariser Lambda** is subscribed to that SNS topic. When it receives the
+insight, it:
+
+1. Extracts the insight JSON from the SNS message
+2. Builds a structured prompt (see [lambda/rca_summariser/handler.py](../lambda/rca_summariser/handler.py))
+3. Calls `bedrock:InvokeModel` with Claude Sonnet
+4. Formats the JSON response as an HTML email table
+5. Attaches the raw insight JSON as a file
+6. Sends via SES to `incidents_email` and `oncall_email`
+
+**Check your `incidents_email` inbox** for a message with subject:
 ```
-[TechStream RCA] Anomaly detected — <timestamp>
-```
-
-The HTML email body contains:
-
-```
-Executive Summary
-─────────────────
-The TechStream Flask ingestion service experienced a 5xx error rate spike of 47%
-beginning at 10:13 UTC on 2026-06-22, lasting approximately 3 minutes before
-automated remediation restored normal operation.
-
-Root Cause
-──────────
-A flood of malformed POST requests to /api/v1/ingest caused the Flask application
-to return HTTP 500 responses for every malformed payload. The application does not
-implement request-rate throttling, allowing the error rate to exceed the 5% alarm
-threshold within 2 minutes.
-
-Impact
-──────
-• Affected endpoints: POST /api/v1/ingest
-• Duration: ~3 minutes (10:13 – 10:16 UTC)
-• Error rate peak: 47.3%
-• Healthy instances: 2 (not reduced — ASG capacity was maintained)
-
-Remediation
-───────────
-Automated: TechStream-prod-Remediator Lambda restarted the flask-app systemd
-service on 2 EC2 instances via SSM Run Command at 10:15:32 UTC.
-Recovery time from alarm to green: 4 minutes 18 seconds.
-
-Prevention Recommendations
-──────────────────────────
-1. Add request-rate limiting (e.g., Flask-Limiter) to cap malformed-payload volume.
-2. Implement input validation middleware that returns 400 (not 500) for malformed payloads.
-3. Enable WAF on the ALB to block automated flood patterns before they reach Flask.
+[TechStream RCA] <InsightId> | HIGH | Errors anomaly
 ```
 
-> The content above is illustrative — the actual text is generated by Bedrock from
-> the real DevOps Guru insight payload and will vary.
+The HTML email contains five fields. What you see depends on whether Bedrock was available:
 
-If the email did not arrive, check:
+**With Bedrock (AI-generated summary):**
+
+| Field | Example content |
+|-------|----------------|
+| Root Cause | Flood of malformed POST requests to /api/v1/ingest caused 500 errors |
+| Leading Signal | Errors |
+| Remediation Taken | flask-app service restarted via SSM Run Command on 2 instances |
+| Customer Impact | Ingest endpoint unavailable for ~3 minutes |
+| Follow-up | Add request-rate limiting; return 400 not 500 for malformed payloads |
+
+**Without Bedrock (SCP-blocked — DCE accounts):**
+
+The email shows a yellow banner: *"Bedrock unavailable in this environment"*. The five fields are populated from the raw DevOps Guru insight JSON — the anomaly description, severity, and affected resources are still accurate, just not narratively summarised by Claude.
+
+Either way, `insight_export.json` is attached — the full raw DevOps Guru payload.
+
+**If the email has not arrived after 5 minutes**, check the RCA Lambda logs:
 
 ```bash
-# RCA Lambda invocations
+aws logs tail /aws/lambda/TechStream-prod-RCASummariser \
+  --since 30m \
+  --region eu-west-1
+```
+
+> DevOps Guru sometimes takes 10–15 minutes to publish its first insight on a new
+> workspace. If it has not arrived after 15 minutes, proceed to Task 11 and check
+> back later.
+
+---
+
+## Task 11 — Run a Second Scenario (CPU Spike)
+
+Repeat the process with the CPU spike scenario to see the CPU alarm fire instead
+of the error rate alarm.
+
+**Terminal 1** — stream remediation log (already running, or restart it):
+```bash
+aws logs tail /techstream/remediation-events --follow --region eu-west-1
+```
+
+**Terminal 2** — watch the CPU alarm:
+```bash
+while true; do
+  echo -n "$(date -u +%H:%M:%S)  "
+  aws cloudwatch describe-alarms \
+    --alarm-name-prefix TechStream-prod-CPU \
+    --region eu-west-1 \
+    --query 'MetricAlarms[0].StateValue' \
+    --output text
+  sleep 15
+done
+```
+
+**Terminal 3** — inject CPU spike via SSM directly on an app instance:
+
+```bash
+CMD_ID=$(aws ssm send-command \
+  --instance-ids "$INSTANCE_ID" \
+  --document-name AWS-RunShellScript \
+  --parameters '{"commands":["python3 -c \"import multiprocessing, time; procs=[multiprocessing.Process(target=lambda: [x*x for _ in iter(int,1)]) for _ in range(multiprocessing.cpu_count())]; [p.start() for p in procs]; time.sleep(180); [p.terminate() for p in procs]\""]}' \
+  --region eu-west-1 \
+  --query 'Command.CommandId' \
+  --output text)
+
+echo "Chaos command ID: $CMD_ID"
+```
+
+Watch Terminal 2. The CPU alarm fires after 2 consecutive minutes above 85 %.
+The Remediator Lambda will again be invoked via EventBridge, this time with
+`alarm_name = TechStream-prod-CPU-High`.
+
+---
+
+## Task 12 — Automated Verification with verify_healing.sh
+
+`verify_healing.sh` wraps the entire test cycle into a single automated script.
+It records baseline metrics, injects chaos, polls for the alarm to fire, waits
+for recovery, then asserts the system healed.
+
+```bash
+# From the repo root
+chmod +x chaos/verify_healing.sh
+
+./chaos/verify_healing.sh \
+  --alb-dns "$APP_ALB" \
+  --region eu-west-1
+```
+
+The script prints progress at each stage:
+
+```
+=== TechStream Self-Healing Verification ===
+Target  : http://techstream-prod-app-XXXXXXXXX.eu-west-1.elb.amazonaws.com
+Region  : eu-west-1
+Alarm   : TechStream-ErrorRate-High
+
+[1/4] Recording baseline 5xx error rate...
+      Baseline: 0.12%
+
+[2/4] Injecting http_500 chaos...
+      Chaos PID: 48321
+
+[3/4] Polling for alarm trigger (max 600s)...
+      t+ 15s  alarm=OK               5xx=1.2%
+      t+ 45s  alarm=OK               5xx=28.4%
+      t+ 75s  alarm=OK               5xx=43.1%
+      t+105s  alarm=OK               5xx=47.8%
+      t+135s  alarm=ALARM            5xx=46.2%
+      Alarm triggered — Lambda remediator should fire.
+
+[4/4] Waiting for chaos to end, then verifying recovery...
+      t+ 30s  alarm=ALARM            5xx=44.9%
+      t+ 60s  alarm=ALARM            5xx=21.3%
+      t+ 90s  alarm=ALARM            5xx=3.1%
+      t+120s  alarm=OK               5xx=0.09%
+
+Self-healing verified: alarm=OK and 5xx rate (0.09%) returned to baseline (0.12%).
+```
+
+Exit code `0` = PASS. Exit code `1` = the system did not heal within 600 seconds.
+
+---
+
+## Task 13 — Tear Down
+
+Destroy all AWS resources when you are done to avoid charges.
+
+```bash
+cd terraform
+terraform destroy
+```
+
+Type `yes` when prompted. Terraform destroys everything in reverse dependency order.
+Takes about 5 minutes.
+
+**Estimated cost if left running 24 hours:**
+| Resource | Daily cost |
+|----------|-----------|
+| 2× EC2 t3.medium (app) | ~$2.00 |
+| 1× EC2 t3.small (monitoring) | ~$0.50 |
+| 4× VPC interface endpoints × 2 AZs | ~$1.92 |
+| S3 gateway endpoint | $0.00 (free) |
+| S3 packages bucket | < $0.01 |
+| 1× ALB (app) | ~$0.27 |
+| Elastic IP (monitoring) | ~$0.00 (free while attached) |
+| Lambda, CloudWatch, DevOps Guru | < $0.10 |
+| **Total** | **~$4.80/day** |
+
+> The VPC endpoint cost replaces the NAT Gateway. You get categorically better security (app instances have zero internet route) at a slightly higher price — ~$0.85/day more than a NAT Gateway would cost.
+
+---
+
+## Troubleshooting
+
+### Monitoring EC2 services not starting
+
+```bash
+MONITORING_ID=$(terraform output -raw monitoring_instance_id)
+
+# Pull the last 100 lines of user-data output
+CMD_ID=$(aws ssm send-command \
+  --instance-ids "$MONITORING_ID" \
+  --document-name AWS-RunShellScript \
+  --parameters '{"commands":["tail -100 /var/log/cloud-init-output.log"]}' \
+  --region eu-west-1 \
+  --query 'Command.CommandId' \
+  --output text)
+
+sleep 10
+
+aws ssm get-command-invocation \
+  --command-id "$CMD_ID" \
+  --instance-id "$MONITORING_ID" \
+  --region eu-west-1 \
+  --query 'StandardOutputContent'
+```
+
+| Symptom | Likely cause | Fix |
+|---------|-------------|-----|
+| `prometheus` inactive | Binary download failed (network timeout) | Monitoring EC2 is in the public subnet — check Security Group allows outbound 443 |
+| `grafana-server` inactive | RPM install failed | Check if `https://dl.grafana.com` is reachable from the monitoring instance |
+| Prometheus targets all `down` | App instances still bootstrapping | Wait 3–5 minutes; app user-data syncs wheels from S3 then starts Flask |
+
+### `pip3 download` fails during `terraform apply`
+
+The `null_resource.pip_wheels` provisioner runs `pip3 download` on your local machine
+before the EC2 instances launch. If this step fails, Terraform aborts with
+`local-exec provisioner error`.
+
+Common causes:
+
+| Error message | Fix |
+|--------------|-----|
+| `Python was not found` (Windows) | Disable App Execution Aliases: Settings → Apps → Advanced app settings → App execution aliases → turn off `python3.exe` / `python.exe`. Then confirm `pip3 --version` works in Git Bash. |
+| `pip3: command not found` | Run `pip3 install --upgrade pip` or install Python 3.11 and add it to PATH |
+| `No matching distribution found` | One of the packages has no pre-built manylinux wheel. Try removing `--only-binary=:all:` for that package in the Terraform provisioner |
+| `aws s3 sync` fails after pip succeeds | Confirm your AWS credentials are configured (`aws sts get-caller-identity`) and the S3 bucket was created |
+
+Once fixed, re-run `terraform apply` — the `null_resource` trigger is a file hash so it
+will re-execute the provisioner and upload the wheels, then continue creating the ASG.
+
+### Prometheus targets show `down` after 5 minutes
+
+Check the Prometheus SD config has the correct ASG name:
+
+```bash
+CMD_ID=$(aws ssm send-command \
+  --instance-ids "$MONITORING_ID" \
+  --document-name AWS-RunShellScript \
+  --parameters '{"commands":["cat /opt/prometheus/prometheus.yml"]}' \
+  --region eu-west-1 \
+  --query 'Command.CommandId' \
+  --output text)
+
+sleep 10
+
+aws ssm get-command-invocation \
+  --command-id "$CMD_ID" \
+  --instance-id "$MONITORING_ID" \
+  --region eu-west-1 \
+  --query 'StandardOutputContent'
+```
+
+Verify the `values` field under `tag:aws:autoscaling:groupName` matches:
+
+```bash
+terraform output asg_name
+```
+
+### CloudWatch alarms stuck in INSUFFICIENT_DATA after 15 minutes
+
+```bash
+# Verify metrics are being published from EC2
+aws cloudwatch list-metrics \
+  --namespace TechStream/GoldenSignals \
+  --region eu-west-1
+```
+
+If this returns empty, the Flask app is not publishing metrics. Check via SSM:
+
+```bash
+aws ssm send-command \
+  --instance-ids "$INSTANCE_ID" \
+  --document-name AWS-RunShellScript \
+  --parameters '{"commands":["systemctl status techstream | tail -5"]}' \
+  --region eu-west-1 \
+  --query 'Command.CommandId' \
+  --output text
+```
+
+### Lambda invoked but action is `none`
+
+The Lambda found no InService instances and no instances below desired. Check the ASG:
+
+```bash
+aws autoscaling describe-auto-scaling-groups \
+  --auto-scaling-group-names TechStream-prod-ASG \
+  --region eu-west-1 \
+  --query 'AutoScalingGroups[0].{Desired:DesiredCapacity,Instances:Instances[*].{ID:InstanceId,State:LifecycleState}}'
+```
+
+### RCA email not arriving
+
+```bash
+# Check Lambda invocations
 aws cloudwatch get-metric-statistics \
   --namespace AWS/Lambda \
   --metric-name Invocations \
   --dimensions Name=FunctionName,Value=TechStream-prod-RCASummariser \
   --start-time $(date -u -d '30 minutes ago' +%Y-%m-%dT%H:%M:%SZ) \
   --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
-  --period 1800 --statistics Sum \
-  --region us-east-1
+  --period 1800 \
+  --statistics Sum \
+  --region eu-west-1 \
+  --query 'Datapoints[0].Sum'
+```
 
-# RCA Lambda logs
+If invocations = 0: DevOps Guru has not published an insight yet. It can take up to 15 minutes on a new workspace. This is normal.
+
+If invocations > 0 but no email:
+
+```bash
 aws logs tail /aws/lambda/TechStream-prod-RCASummariser \
-  --since 30m --region us-east-1
+  --since 30m \
+  --region eu-west-1
 ```
+
+| Error | Fix |
+|-------|-----|
+| `AccessDeniedException: bedrock:InvokeModel` | Run the CLI invoke-model test in Task 1b — first-time Anthropic accounts need use-case approval |
+| `AccessDeniedException: ses:SendEmail` | Verify all three email addresses in SES (Task 1a) |
+| `MessageRejected` | Destination address is not SES-verified — verify all recipients |
+
+### Grafana panels show "No data"
+
+1. Click the gear icon → **Data Sources** → click **Prometheus** → **Save & Test** — should show `Data source connected and labels found`
+2. If it fails, check that Prometheus is running: use the SSM check from Task 5b
+3. Verify Prometheus is scraping: open `http://<EIP>:9090/targets` in a browser — all targets should show `UP`
 
 ---
 
-## 12. Automated Healing Verification
-
-`verify_healing.sh` captures a before/after snapshot and asserts the system healed.
-
-```bash
-chmod +x chaos/verify_healing.sh
-
-./chaos/verify_healing.sh \
-  --alb-dns techstream-prod-app-XXXXXXXXX.us-east-1.elb.amazonaws.com \
-  --region us-east-1
-```
-
-The script runs through four stages:
+## Lab Completion Checklist
 
 ```
-=== TechStream Self-Healing Verification ===
-Target  : http://techstream-prod-app-XXXXXXXXX.us-east-1.elb.amazonaws.com
-Region  : us-east-1
-Alarm   : TechStream-prod-ErrorRate-High
-
-[1/4] Recording baseline 5xx error rate...
-      Baseline: 0.12%
-
-[2/4] Injecting http_500 chaos (180s)...
-      [chaos running — watch Grafana and Terminal B for alarm state]
-
-[3/4] Waiting for alarm to fire (polling every 30s, timeout 600s)...
-      T+120s → Alarm state: ALARM  ✓
-
-[4/4] Waiting for recovery (polling every 30s, timeout 600s)...
-      T+150s → Alarm state: ALARM
-      T+180s → Alarm state: ALARM
-      T+210s → Alarm state: OK    ✓
-      Recovery error rate: 0.09%
-
-=== Result ===
-Baseline error rate : 0.12%
-Peak alarm state    : ALARM (confirmed)
-Recovery error rate : 0.09%
-Healing time        : 4m 32s
-PASS — system healed within tolerance (≤ baseline + 1.0%)
-```
-
-A non-zero exit code means the alarm never fired or the system did not recover
-within 10 minutes.
-
----
-
-## 13. Tear Down
-
-When you are done, destroy all resources to avoid ongoing costs.
-
-```bash
-cd terraform
-
-terraform destroy
-```
-
-Type `yes` when prompted. This destroys every resource Terraform manages in reverse
-dependency order.
-
-**Estimated monthly cost if left running:**
-- ECS Fargate (0.5 vCPU, 1 GB): ~$15
-- 2× EC2 t3.medium: ~$60
-- NAT Gateway: ~$32 (+ data transfer)
-- AMP: ~$0 (free tier covers low ingestion volumes)
-- ALBs: ~$16
-- Lambda: < $1
-
-Total: ~$120/month. Destroy after the demo.
-
----
-
-## 14. Troubleshooting
-
-### ECS task stays in PENDING / STOPPED
-
-```bash
-# Check stopped task failure reason
-aws ecs describe-tasks \
-  --cluster TechStream-prod-grafana \
-  --tasks $(aws ecs list-tasks --cluster TechStream-prod-grafana --query 'taskArns[0]' --output text) \
-  --region us-east-1 \
-  --query 'tasks[0].{Status:lastStatus,Reason:stoppedReason}'
-```
-
-Most common causes:
-- **Image not found in ECR** — run Step 6 (build + push) and wait 90 seconds
-- **Task role lacks `aps:QueryMetrics`** — check the monitoring module IAM policy
-- **Health check failing** — Grafana starts slowly; ALB health check grace period is 120 s
-
-### CloudWatch alarms stuck in INSUFFICIENT_DATA
-
-This is normal for the first 5–10 minutes. Alarms need at least 2 data points before
-evaluating. Wait and re-run the check in step 7.4.
-
-If they stay in `INSUFFICIENT_DATA` after 15 minutes:
-
-```bash
-# Check that EC2 instances are publishing metrics
-aws cloudwatch list-metrics \
-  --namespace TechStream/GoldenSignals \
-  --region us-east-1
-```
-
-If no metrics appear, SSH into an instance (set `key_name` in tfvars and re-apply)
-and check `systemctl status flask-app` and `systemctl status prometheus`.
-
-### Lambda shows errors in CloudWatch Logs
-
-```bash
-aws logs tail /aws/lambda/TechStream-prod-Remediator \
-  --since 1h --region us-east-1
-```
-
-Common errors and fixes:
-
-| Error message | Fix |
-|--------------|-----|
-| `AccessDeniedException: ses:SendEmail` | Verify the SES from-address and confirm sandbox restrictions (step 3.1) |
-| `AccessDeniedException: bedrock:InvokeModel` | Enable Claude Sonnet in Bedrock console (step 3.2) |
-| `ResourceNotFoundException: ASG not found` | The `ASG_NAME` env var on the Lambda must match the ASG name — check `module.asg.name` output |
-| `SSM: InvalidInstanceId` | Instances may not have the SSM agent running — AL2023 includes it by default; check IAM instance profile includes `AmazonSSMManagedInstanceCore` |
-
-### Grafana shows "no data" on panels
-
-1. **Check the datasource**: Configuration → Data Sources → AMP → Save & Test
-2. **Check AMP is receiving data**: 
-   ```bash
-   aws amp query-metrics \
-     --workspace-id $(aws amp list-workspaces --query 'workspaces[0].workspaceId' --output text) \
-     --query 'up' \
-     --region us-east-1
-   ```
-3. **Check Prometheus on EC2** is running and can reach AMP:
-   ```bash
-   aws ssm send-command --instance-ids i-XXX \
-     --document-name AWS-RunShellScript \
-     --parameters '{"commands":["journalctl -u prometheus --since \"5 minutes ago\" | tail -20"]}' \
-     --region us-east-1 --query 'Command.CommandId' --output text
-   ```
-
-### SES emails not arriving
-
-1. Confirm subscription confirmation emails were clicked (step 5)
-2. Check SES verified identities:
-   ```bash
-   aws ses list-verified-email-addresses --region us-east-1
-   ```
-3. Check SES sending statistics for bounces or blocks:
-   ```bash
-   aws ses get-send-statistics --region us-east-1
-   ```
-
-### chaos.py fails with connection error
-
-The Flask app ALB is separate from the Grafana ALB. Make sure you are using the
-correct ALB DNS name (step 9). If the app ALB does not exist, check that the ASG
-module created a target group and the instances registered successfully.
-
----
-
-## Summary Checklist
-
-```
-[ ] SES: three email addresses verified
-[ ] Bedrock: Claude Sonnet model access granted
-[ ] terraform.tfvars filled in
-[ ] terraform apply completed — all 8 modules green
-[ ] SNS subscription confirmation emails clicked
-[ ] Docker image built and pushed to ECR
-[ ] ECS service: Running=1, Desired=1
-[ ] 2 EC2 instances InService in ASG
-[ ] All 3 CloudWatch alarms in OK state
-[ ] Grafana reachable and Golden Signals dashboard showing data
-[ ] chaos.py run — error rate spiked on dashboard
-[ ] Remediator Lambda invoked — audit log entry in /techstream/remediation-events
-[ ] Alarm returned to OK — Grafana panel green
-[ ] RCA email received in incidents inbox
-[ ] verify_healing.sh returned PASS
-[ ] terraform destroy completed
+[ ] Task 0  — AWS CLI configured and sts get-caller-identity returns account ID
+[ ] Task 1  — Email verified in SES; Bedrock Claude Sonnet access granted
+[ ] Task 2  — Explored repository structure and key files
+[ ] Task 3  — terraform.tfvars filled in with real email and password
+[ ] Task 4  — terraform apply completed; all 7 modules green; outputs saved
+[ ] Task 4e — SNS subscription confirmation emails clicked
+[ ] Task 5  — Monitoring EC2 bootstrap complete; prometheus and grafana-server both active
+[ ] Task 5  — Prometheus EC2 SD showing 2 targets UP
+[ ] Task 6  — All 6 component checks pass (EC2 InService, Flask healthy, alarms OK)
+[ ] Task 7  — Grafana dashboard open and showing live data; Prometheus datasource green
+[ ] Task 8  — chaos.py http_500 running; Error Rate panel turned red in Grafana
+[ ] Task 9  — Alarm fired (ALARM state observed); Lambda audit log appeared in Terminal 1
+[ ] Task 9  — Alarm returned to OK; Grafana Error Rate panel green again
+[ ] Task 10 — RCA email received with Bedrock-generated analysis
+[ ] Task 11 — CPU spike scenario run; CPU alarm fired and healed
+[ ] Task 12 — verify_healing.sh completed with PASS
+[ ] Task 13 — terraform destroy completed; no resources remain
 ```

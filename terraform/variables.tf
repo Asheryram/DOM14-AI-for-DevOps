@@ -1,7 +1,7 @@
 variable "aws_region" {
   description = "AWS region for all resources"
   type        = string
-  default     = "us-east-1"
+  default     = "eu-west-1"
 }
 
 variable "environment" {
@@ -77,7 +77,7 @@ variable "ses_from_email" {
 variable "bedrock_model_id" {
   description = "Amazon Bedrock model ID for RCA summarisation"
   type        = string
-  default     = "us.anthropic.claude-sonnet-4-6-20251001-v1:0"
+  default     = "anthropic.claude-sonnet-4-6"
 }
 
 # ── DevOps Guru ───────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ALB_DNS=""
-REGION="us-east-1"
+REGION="eu-west-1"
 NAMESPACE="TechStream/GoldenSignals"
 METRIC_NAME="5xx_error_rate"
 ALARM_NAME="TechStream-ErrorRate-High"

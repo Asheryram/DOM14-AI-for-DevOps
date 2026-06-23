@@ -2,7 +2,7 @@
 # terraform.tfvars is gitignored — never commit it.
 
 # ── Region / environment ──────────────────────────────────────────────────────
-aws_region  = "us-east-1"
+aws_region  = "eu-west-1"
 environment = "prod"
 
 # ── Networking (Terraform creates the VPC and all subnets automatically) ──────
@@ -23,7 +23,7 @@ incidents_email = "incidents@techstream.io"
 ses_from_email  = "devops-guru@techstream.io"   # must be verified in SES
 
 # ── Bedrock model for RCA ─────────────────────────────────────────────────────
-bedrock_model_id = "us.anthropic.claude-sonnet-4-6-20251001-v1:0"
+bedrock_model_id = "anthropic.claude-sonnet-4-6"
 
 # ── DevOps Guru ───────────────────────────────────────────────────────────────
 cloudformation_stack_name = "TechStream-Prod"

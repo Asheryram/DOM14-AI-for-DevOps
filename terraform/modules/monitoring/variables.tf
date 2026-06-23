@@ -6,7 +6,7 @@ variable "name_prefix" {
 variable "aws_region" {
   description = "AWS region"
   type        = string
-  default     = "us-east-1"
+  default     = "eu-west-1"
 }
 
 variable "vpc_id" {
@@ -14,23 +14,18 @@ variable "vpc_id" {
   type        = string
 }
 
-variable "subnet_ids" {
-  description = "Public subnet IDs (≥2 AZs) for the ALB and ECS Fargate tasks"
-  type        = list(string)
-}
-
-variable "amp_endpoint" {
-  description = "AMP workspace prometheus_endpoint (base URL)"
+variable "vpc_cidr" {
+  description = "VPC CIDR block — allows Prometheus port from within the VPC"
   type        = string
 }
 
-variable "amp_workspace_arn" {
-  description = "AMP workspace ARN (scopes Grafana task role permissions)"
+variable "subnet_id" {
+  description = "Public subnet ID for the monitoring EC2 instance"
   type        = string
 }
 
-variable "alerts_sns_topic_arn" {
-  description = "SNS topic ARN wired as a Grafana alert notification channel"
+variable "asg_name" {
+  description = "Auto Scaling Group name — used for Prometheus EC2 service discovery"
   type        = string
 }
 
@@ -40,20 +35,14 @@ variable "grafana_admin_password" {
   sensitive   = true
 }
 
-variable "grafana_image_uri" {
-  description = "ECR image URI for the custom Grafana image. Defaults to <ecr_repo>:latest if empty."
+variable "instance_type" {
+  description = "EC2 instance type for the monitoring server"
+  type        = string
+  default     = "t3.small"
+}
+
+variable "key_name" {
+  description = "EC2 key pair name for SSH access — leave empty to disable SSH"
   type        = string
   default     = ""
-}
-
-variable "grafana_task_cpu" {
-  description = "Fargate task CPU units (512 = 0.5 vCPU)"
-  type        = number
-  default     = 512
-}
-
-variable "grafana_task_memory" {
-  description = "Fargate task memory in MiB"
-  type        = number
-  default     = 1024
 }

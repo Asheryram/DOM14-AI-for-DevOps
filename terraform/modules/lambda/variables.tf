@@ -56,7 +56,7 @@ variable "rca_summariser_zip_hash" {
 variable "aws_region" {
   description = "AWS region (passed to Lambda as AWS_REGION env var)"
   type        = string
-  default     = "us-east-1"
+  default     = "eu-west-1"
 }
 
 variable "lambda_timeout" {

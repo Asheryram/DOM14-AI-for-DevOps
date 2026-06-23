@@ -3,9 +3,14 @@ output "grafana_url" {
   value       = module.monitoring.grafana_url
 }
 
-output "ecr_repository_url" {
-  description = "Push the custom Grafana image here before the ECS service starts"
-  value       = module.monitoring.ecr_repository_url
+output "prometheus_url" {
+  description = "Prometheus URL — for ad-hoc PromQL queries"
+  value       = module.monitoring.prometheus_url
+}
+
+output "monitoring_instance_id" {
+  description = "Monitoring EC2 instance ID (Prometheus + Grafana)"
+  value       = module.monitoring.instance_id
 }
 
 output "asg_name" {
@@ -16,16 +21,6 @@ output "asg_name" {
 output "sns_topic_arn" {
   description = "SNS alerts topic ARN"
   value       = module.alarms.sns_topic_arn
-}
-
-output "amp_remote_write_url" {
-  description = "Paste into prometheus.yml remote_write.url on EC2 Prometheus instances"
-  value       = module.amp.remote_write_url
-}
-
-output "amp_ssm_parameter" {
-  description = "SSM parameter that stores the AMP remote_write URL (EC2 user-data reads this)"
-  value       = module.amp.ssm_parameter_name
 }
 
 output "remediator_function_arn" {
@@ -49,6 +44,6 @@ output "private_subnet_ids" {
 }
 
 output "public_subnet_ids" {
-  description = "Public subnet IDs (ALB, Grafana ECS)"
+  description = "Public subnet IDs (monitoring EC2)"
   value       = module.vpc.public_subnet_ids
 }

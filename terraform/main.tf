@@ -11,27 +11,17 @@ module "vpc" {
   cidr_block  = var.vpc_cidr
 }
 
-# ── Amazon Managed Service for Prometheus ─────────────────────────────────────
-
-module "amp" {
-  source = "./modules/amp"
-
-  name_prefix = local.name_prefix
-}
-
 # ── EC2 launch template + instance profile ────────────────────────────────────
 
 module "compute" {
   source = "./modules/compute"
 
-  name_prefix                 = local.name_prefix
-  vpc_id                      = module.vpc.vpc_id
-  vpc_cidr                    = module.vpc.cidr_block
-  instance_type               = var.instance_type
-  key_name                    = var.key_name
-  ec2_remote_write_policy_arn = module.amp.ec2_remote_write_policy_arn
-  amp_ssm_parameter_name      = module.amp.ssm_parameter_name
-  aws_region                  = var.aws_region
+  name_prefix   = local.name_prefix
+  vpc_id        = module.vpc.vpc_id
+  vpc_cidr      = module.vpc.cidr_block
+  instance_type = var.instance_type
+  key_name      = var.key_name
+  aws_region    = var.aws_region
 }
 
 # ── Auto Scaling Group ────────────────────────────────────────────────────────
@@ -99,7 +89,7 @@ module "devops_guru" {
   sns_topic_arn = module.alarms.sns_topic_arn
 }
 
-# ── Grafana on ECS Fargate ────────────────────────────────────────────────────
+# ── Self-hosted Prometheus + Grafana on EC2 ───────────────────────────────────
 
 module "monitoring" {
   source = "./modules/monitoring"
@@ -107,9 +97,9 @@ module "monitoring" {
   name_prefix            = local.name_prefix
   aws_region             = var.aws_region
   vpc_id                 = module.vpc.vpc_id
-  subnet_ids             = module.vpc.public_subnet_ids
-  amp_endpoint           = module.amp.prometheus_endpoint
-  amp_workspace_arn      = module.amp.workspace_arn
-  alerts_sns_topic_arn   = module.alarms.sns_topic_arn
+  vpc_cidr               = module.vpc.cidr_block
+  subnet_id              = module.vpc.public_subnet_ids[0]
+  asg_name               = module.asg.name
   grafana_admin_password = var.grafana_admin_password
+  key_name               = var.key_name
 }

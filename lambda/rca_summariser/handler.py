@@ -9,7 +9,7 @@ from email.mime.application import MIMEApplication
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-BEDROCK_MODEL = os.environ.get('BEDROCK_MODEL', 'us.anthropic.claude-sonnet-4-6-20251001-v1:0')
+BEDROCK_MODEL = os.environ.get('BEDROCK_MODEL', 'anthropic.claude-sonnet-4-6')
 SES_FROM = os.environ.get('SES_FROM', 'devops-guru@techstream.io')
 SES_TO   = os.environ.get('SES_TO',   'incidents@techstream.io')
 ONCALL   = os.environ.get('ONCALL',   'oncall@techstream.io')
@@ -59,17 +59,28 @@ def handler(event, context):
     message = event['Records'][0]['Sns']['Message']
     insight = json.loads(message)
 
+    bedrock_available = True
     try:
         summary = _invoke_bedrock(insight)
         logger.info('Bedrock RCA generated for insight %s', insight.get('InsightId'))
-    except Exception:
-        logger.exception('Bedrock invocation failed — using fallback summary')
+    except Exception as exc:
+        bedrock_available = False
+        if 'AccessDenied' in type(exc).__name__ or 'AccessDenied' in str(exc):
+            logger.warning('Bedrock blocked by SCP — sending raw-insight email')
+        else:
+            logger.exception('Bedrock invocation failed — using fallback summary')
+        anomalies = insight.get('Anomalies', [])
+        anomaly_desc = anomalies[0].get('Description', 'No description available') if anomalies else 'No anomalies listed'
+        resources = ', '.join(
+            r.get('Name', r.get('Arn', 'unknown'))
+            for r in insight.get('ResourceCollection', {}).get('CloudFormation', {}).get('StackNames', [])
+        ) or 'See attached JSON'
         summary = {
-            'root_cause_summary': 'Could not generate automatic summary — check Lambda logs.',
-            'leading_golden_signal': 'Errors',
-            'remediation_taken': 'N/A',
-            'customer_impact': 'Unknown',
-            'recommended_followup': 'Investigate the DevOps Guru insight manually.'
+            'root_cause_summary': anomaly_desc,
+            'leading_golden_signal': insight.get('Type', 'Errors'),
+            'remediation_taken': 'See CloudWatch Logs — /techstream/remediation-events',
+            'customer_impact': f"Severity: {insight.get('Severity', 'UNKNOWN')} | Resources: {resources}",
+            'recommended_followup': 'Review attached insight_export.json for full details'
         }
 
     msg = MIMEMultipart('mixed')
@@ -82,8 +93,15 @@ def handler(event, context):
     msg['To'] = SES_TO
     msg['Cc'] = ONCALL
 
+    bedrock_banner = (
+        '<p style="background:#fff3cd;padding:8px;border-left:4px solid #ffc107">'
+        '<b>Note:</b> Bedrock unavailable in this environment — summary extracted from raw DevOps Guru insight.</p>'
+        if not bedrock_available else ''
+    )
+
     html = f"""<html><body>
 <h2>TechStream Incident RCA — Auto-generated</h2>
+{bedrock_banner}
 <table border="0" cellpadding="6" style="border-collapse:collapse">
   <tr><td><b>Root Cause</b></td><td>{summary.get('root_cause_summary')}</td></tr>
   <tr><td><b>Leading Signal</b></td><td>{summary.get('leading_golden_signal')}</td></tr>
