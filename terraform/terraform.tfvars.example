@@ -15,7 +15,7 @@ key_name      = ""          # set to an existing EC2 key pair name to enable SSH
 # ── Auto Scaling capacity ─────────────────────────────────────────────────────
 asg_min_size         = 2
 asg_max_size         = 10
-asg_desired_capacity = 1
+asg_desired_capacity = 2
 
 # ── Notification addresses ────────────────────────────────────────────────────
 oncall_email    = "oncall@techstream.io"

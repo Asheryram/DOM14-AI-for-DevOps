@@ -24,6 +24,22 @@ SUMMARY_SCHEMA = {
 
 bedrock = boto3.client('bedrock-runtime')
 ses = boto3.client('ses')
+cw = boto3.client('cloudwatch')
+
+
+def _publish_bedrock_metric(available):
+    """Surface the silent Bedrock fallback so a permanently-broken RCA path is visible."""
+    try:
+        cw.put_metric_data(
+            Namespace='TechStream/RCA',
+            MetricData=[{
+                'MetricName': 'bedrock_available',
+                'Value': 1 if available else 0,
+                'Unit': 'Count'
+            }]
+        )
+    except Exception:
+        logger.warning('Failed to publish bedrock_available metric', exc_info=True)
 
 
 def _invoke_bedrock(insight):
@@ -59,6 +75,13 @@ def handler(event, context):
     message = event['Records'][0]['Sns']['Message']
     insight = json.loads(message)
 
+    # This Lambda subscribes only to the DevOps Guru insights topic, but guard
+    # defensively: a CloudWatch alarm/OK notification is also valid JSON and must
+    # not be summarised as a bogus "unknown" insight.
+    if 'InsightId' not in insight or 'AlarmName' in insight:
+        logger.info('Non-insight SNS message (likely CloudWatch alarm/OK) — skipping RCA')
+        return {'statusCode': 200, 'body': 'skipped: not a DevOps Guru insight'}
+
     bedrock_available = True
     try:
         summary = _invoke_bedrock(insight)
@@ -71,10 +94,9 @@ def handler(event, context):
             logger.exception('Bedrock invocation failed — using fallback summary')
         anomalies = insight.get('Anomalies', [])
         anomaly_desc = anomalies[0].get('Description', 'No description available') if anomalies else 'No anomalies listed'
-        resources = ', '.join(
-            r.get('Name', r.get('Arn', 'unknown'))
-            for r in insight.get('ResourceCollection', {}).get('CloudFormation', {}).get('StackNames', [])
-        ) or 'See attached JSON'
+        # DevOps Guru returns StackNames as a list of plain strings.
+        stack_names = insight.get('ResourceCollection', {}).get('CloudFormation', {}).get('StackNames', [])
+        resources = ', '.join(stack_names) or 'See attached JSON'
         summary = {
             'root_cause_summary': anomaly_desc,
             'leading_golden_signal': insight.get('Type', 'Errors'),
@@ -82,6 +104,8 @@ def handler(event, context):
             'customer_impact': f"Severity: {insight.get('Severity', 'UNKNOWN')} | Resources: {resources}",
             'recommended_followup': 'Review attached insight_export.json for full details'
         }
+
+    _publish_bedrock_metric(bedrock_available)
 
     msg = MIMEMultipart('mixed')
     msg['Subject'] = (

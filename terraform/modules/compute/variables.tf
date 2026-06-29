@@ -20,7 +20,7 @@ variable "instance_type" {
 }
 
 variable "key_name" {
-  description = "EC2 key pair name for SSH access — leave empty to disable SSH"
+  description = "EC2 key pair name. App instances are private (SSM-only); this is reserved for break-glass and is intentionally NOT wired to an inbound SSH rule."
   type        = string
   default     = ""
 }
@@ -29,4 +29,10 @@ variable "aws_region" {
   description = "AWS region"
   type        = string
   default     = "eu-west-1"
+}
+
+variable "node_exporter_version" {
+  description = "node_exporter version to stage to S3 and run on app instances for host CPU/memory metrics"
+  type        = string
+  default     = "1.8.2"
 }

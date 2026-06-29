@@ -1,0 +1,3 @@
+# Dev/test dependencies. Installs the app runtime deps (so app.py imports) plus pytest.
+-r app/requirements.txt
+pytest>=8.0.0

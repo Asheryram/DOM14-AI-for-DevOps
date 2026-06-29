@@ -22,20 +22,20 @@ resource "aws_iam_role_policy_attachment" "basic_execution" {
 
 data "aws_iam_policy_document" "permissions" {
   statement {
-    sid     = "ASG"
-    actions = ["autoscaling:DescribeAutoScalingGroups", "autoscaling:SetDesiredCapacity"]
+    sid       = "ASG"
+    actions   = ["autoscaling:DescribeAutoScalingGroups", "autoscaling:SetDesiredCapacity"]
     resources = ["*"]
   }
 
   statement {
-    sid     = "SSM"
-    actions = ["ssm:SendCommand", "ssm:GetCommandInvocation"]
+    sid       = "SSM"
+    actions   = ["ssm:SendCommand", "ssm:GetCommandInvocation"]
     resources = ["*"]
   }
 
   statement {
-    sid     = "CloudWatch"
-    actions = ["cloudwatch:PutMetricData"]
+    sid       = "CloudWatch"
+    actions   = ["cloudwatch:PutMetricData"]
     resources = ["*"]
   }
 
@@ -52,14 +52,14 @@ data "aws_iam_policy_document" "permissions" {
   }
 
   statement {
-    sid     = "SES"
-    actions = ["ses:SendEmail", "ses:SendRawEmail"]
+    sid       = "SES"
+    actions   = ["ses:SendEmail", "ses:SendRawEmail"]
     resources = ["arn:aws:ses:${var.aws_region}:*:identity/*"]
   }
 
   statement {
-    sid     = "Bedrock"
-    actions = ["bedrock:InvokeModel"]
+    sid       = "Bedrock"
+    actions   = ["bedrock:InvokeModel"]
     resources = ["arn:aws:bedrock:${var.aws_region}::foundation-model/*"]
   }
 }
@@ -89,32 +89,21 @@ resource "aws_lambda_function" "remediator" {
 
   environment {
     variables = {
-      ASG_NAME = var.asg_name
-      SES_FROM = var.ses_from
-      SES_TO   = var.ses_to
+      ASG_NAME    = var.asg_name
+      SES_FROM    = var.ses_from
+      SES_TO      = var.ses_to
+      APP_SERVICE = "techstream"
     }
   }
 
   depends_on = [aws_iam_role_policy_attachment.basic_execution]
 }
 
-resource "aws_lambda_permission" "remediator_sns" {
-  statement_id  = "AllowSNSInvoke"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.remediator.function_name
-  principal     = "sns.amazonaws.com"
-  source_arn    = var.alerts_sns_topic_arn
-}
-
-resource "aws_sns_topic_subscription" "remediator" {
-  topic_arn = var.alerts_sns_topic_arn
-  protocol  = "lambda"
-  endpoint  = aws_lambda_function.remediator.arn
-}
-
 # ── EventBridge rule: CloudWatch Alarm → Remediator Lambda ───────────────────
-# This is the primary remediation trigger the project objectives call for.
-# The SNS subscription above remains as a fallback notification path.
+# EventBridge is the single remediation trigger. It filters to state=ALARM, so
+# the remediator fires exactly once per ALARM and never on OK/INSUFFICIENT_DATA.
+# (No SNS subscription on the remediator — that would double-invoke on ALARM and
+# wrongly remediate on the OK recovery notification.)
 
 resource "aws_cloudwatch_event_rule" "alarm_to_remediation" {
   name        = "${var.name_prefix}-AlarmToRemediation"
@@ -177,11 +166,11 @@ resource "aws_lambda_permission" "rca_summariser_sns" {
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.rca_summariser.function_name
   principal     = "sns.amazonaws.com"
-  source_arn    = var.alerts_sns_topic_arn
+  source_arn    = var.insights_sns_topic_arn
 }
 
 resource "aws_sns_topic_subscription" "rca_summariser" {
-  topic_arn = var.alerts_sns_topic_arn
+  topic_arn = var.insights_sns_topic_arn
   protocol  = "lambda"
   endpoint  = aws_lambda_function.rca_summariser.arn
 }

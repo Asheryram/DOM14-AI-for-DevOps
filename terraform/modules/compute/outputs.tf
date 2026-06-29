@@ -3,6 +3,11 @@ output "launch_template_id" {
   value       = aws_launch_template.app.id
 }
 
+output "launch_template_latest_version" {
+  description = "Latest version of the launch template (drives ASG instance refresh on change)"
+  value       = aws_launch_template.app.latest_version
+}
+
 output "instance_profile_arn" {
   description = "IAM instance profile ARN"
   value       = aws_iam_instance_profile.app.arn
@@ -14,6 +19,6 @@ output "security_group_id" {
 }
 
 output "ami_id" {
-  description = "Ubuntu AMI used in the launch template"
-  value       = data.aws_ami.ubuntu.id
+  description = "Amazon Linux 2023 AMI used in the launch template"
+  value       = data.aws_ami.al2023.id
 }

@@ -1,3 +1,15 @@
+"""TechStream chaos injection tool.
+
+The app ASG runs in private subnets with no public ingress (no ALB, no NAT), so
+this tool is designed to run ON an app instance via SSM Run Command and target
+the local Flask process at localhost:8000. See chaos/verify_healing.sh, which
+ships this file to an instance and drives the full inject -> heal cycle.
+
+Scenarios:
+  http_500     flood /api/v1/ingest with malformed POSTs -> 5xx_error_rate alarm
+  cpu_spike    peg all CPUs                              -> CPU-High alarm
+  memory_leak  allocate until threshold                 -> Memory-High alarm
+"""
 import argparse
 import concurrent.futures
 import time
@@ -28,19 +40,19 @@ def cw_log(client, stream_name, message):
     )
 
 
-def scenario_http_500(alb_dns, region, duration=180):
+def scenario_http_500(target, region, duration=180):
     client = boto3.client('logs', region_name=region)
     stream = f'http_500-{int(time.time())}'
+    url = f'http://{target}/api/v1/ingest'
     cw_log(client, stream, {
         'chaos_start': {
             'scenario': 'http_500',
             'timestamp': datetime.now(timezone.utc).isoformat(),
-            'target_endpoint': f'http://{alb_dns}/api/v1/ingest',
-            'expected_signal_impact': '5xx increase >10%'
+            'target_endpoint': url,
+            'expected_signal_impact': '5xx increase >5%'
         }
     })
 
-    url = f'http://{alb_dns}/api/v1/ingest'
     stop_time = time.time() + duration
     error_count = 0
     total_count = 0
@@ -60,15 +72,13 @@ def scenario_http_500(alb_dns, region, duration=180):
             time.sleep(1)
             done = [f for f in futures if f.done()]
             for f in done:
-                result = f.result()
-                error_count += result
+                error_count += f.result()
                 total_count += 1
             futures = [f for f in futures if not f.done()]
             print(f'[http_500] elapsed={int(stop_time - time.time())}s remaining  errors={error_count}  total={total_count}')
 
         for f in concurrent.futures.as_completed(futures):
-            result = f.result()
-            error_count += result
+            error_count += f.result()
             total_count += 1
 
     cw_log(client, stream, {
@@ -156,15 +166,15 @@ def scenario_memory_leak(region, target_pct=90, max_duration=300):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='TechStream chaos injection tool')
+    parser = argparse.ArgumentParser(description='TechStream chaos injection tool (run on an app instance via SSM)')
     parser.add_argument('--scenario', required=True, choices=['http_500', 'cpu_spike', 'memory_leak'])
-    parser.add_argument('--alb-dns', default='localhost:8000')
-    parser.add_argument('--region', default='us-east-1')
+    parser.add_argument('--target', default='localhost:8000', help='host:port of the local Flask app (http_500 only)')
+    parser.add_argument('--region', default='eu-west-1')
     parser.add_argument('--duration', type=int, default=180)
     args = parser.parse_args()
 
     if args.scenario == 'http_500':
-        scenario_http_500(args.alb_dns, args.region, args.duration)
+        scenario_http_500(args.target, args.region, args.duration)
     elif args.scenario == 'cpu_spike':
         scenario_cpu_spike(args.region, args.duration)
     elif args.scenario == 'memory_leak':

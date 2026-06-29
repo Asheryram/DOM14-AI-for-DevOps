@@ -9,6 +9,16 @@ venv/
 venv.bak/
 .python-version
 
+# Python tooling / test caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+.pytest-of-*/
+
 # Distribution / packaging
 build/
 dist/
@@ -26,7 +36,7 @@ dist/
 **/*.tfstate
 **/*.tfstate.backup
 **/.terraform/
-**/.terraform.lock.hcl
+.terraform.tfstate.lock.info
 crash.log
 override.tf
 override.tf.json
@@ -34,7 +44,10 @@ override.tf.json
 *.tfvars.json
 !*.tfvars.example
 tfplan
+*.tfplan
 **/tfplan
+# NOTE: .terraform.lock.hcl is intentionally committed (pins provider versions
+# for reproducible builds) — do not add it here.
 
 # Build artifacts
 .build/

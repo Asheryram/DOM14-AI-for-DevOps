@@ -7,6 +7,7 @@ import json
 import os
 import threading
 import boto3
+import psutil
 
 app = Flask(__name__)
 app.start_time = time.time()
@@ -94,9 +95,10 @@ def status():
 
 def _cloudwatch_publisher():
     global _window_total, _window_errors
-    region = os.environ.get('AWS_REGION', 'us-east-1')
-    asg_name = os.environ.get('ASG_NAME', 'TechStream-Prod-ASG')
+    region = os.environ.get('AWS_REGION', 'eu-west-1')
+    asg_name = os.environ.get('ASG_NAME', 'TechStream-prod-ASG')
     cw = boto3.client('cloudwatch', region_name=region)
+    dimensions = [{'Name': 'AutoScalingGroupName', 'Value': asg_name}]
     while True:
         time.sleep(60)
         with _cw_lock:
@@ -104,21 +106,27 @@ def _cloudwatch_publisher():
             errors = _window_errors
             _window_total = 0
             _window_errors = 0
-        if total == 0:
-            continue
-        error_rate = (errors / total) * 100
+
+        metric_data = []
+        # 5xx error rate — only when there was traffic, so an idle fleet does not
+        # publish a misleading 0/0 (the alarm treats missing data as not-breaching).
+        if total > 0:
+            metric_data.append({
+                'MetricName': '5xx_error_rate',
+                'Value': (errors / total) * 100,
+                'Unit': 'Percent',
+                'Dimensions': dimensions
+            })
+        # System memory — published every cycle so the Memory-High alarm always
+        # has data. node_exporter also exposes this to Prometheus for Grafana.
+        metric_data.append({
+            'MetricName': 'mem_used_percent',
+            'Value': psutil.virtual_memory().percent,
+            'Unit': 'Percent',
+            'Dimensions': dimensions
+        })
         try:
-            cw.put_metric_data(
-                Namespace='TechStream/GoldenSignals',
-                MetricData=[{
-                    'MetricName': '5xx_error_rate',
-                    'Value': error_rate,
-                    'Unit': 'Percent',
-                    'Dimensions': [
-                        {'Name': 'AutoScalingGroupName', 'Value': asg_name}
-                    ]
-                }]
-            )
+            cw.put_metric_data(Namespace='TechStream/GoldenSignals', MetricData=metric_data)
         except Exception:
             pass
 

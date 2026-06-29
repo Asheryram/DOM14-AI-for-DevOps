@@ -1,5 +1,13 @@
+# Alerts topic — CloudWatch alarm/OK notifications fan out to humans here.
 resource "aws_sns_topic" "alerts" {
   name = "${var.name_prefix}-alerts"
+}
+
+# Insights topic — DevOps Guru publishes here; only the RCA summariser Lambda
+# subscribes. Kept separate from alerts so the RCA Lambda is not invoked on
+# every CloudWatch alarm/OK transition.
+resource "aws_sns_topic" "insights" {
+  name = "${var.name_prefix}-insights"
 }
 
 resource "aws_sns_topic_subscription" "oncall" {
@@ -34,7 +42,9 @@ resource "aws_cloudwatch_metric_alarm" "error_rate_high" {
     AutoScalingGroupName = var.asg_name
   }
 
-  treat_missing_data        = "breaching"
+  # No traffic => no datapoint. Treat that as healthy, not as an error spike,
+  # so the alarm does not latch ALARM (and trigger remediation) on an idle fleet.
+  treat_missing_data        = "notBreaching"
   alarm_description         = "5xx error rate exceeded ${var.error_rate_threshold}% for 2 consecutive 2-minute periods"
   alarm_actions             = [aws_sns_topic.alerts.arn]
   ok_actions                = [aws_sns_topic.alerts.arn]
@@ -76,7 +86,9 @@ resource "aws_cloudwatch_metric_alarm" "memory_high" {
     AutoScalingGroupName = var.asg_name
   }
 
-  treat_missing_data        = "breaching"
+  # mem_used_percent is published by the Flask app (app.py). If that pipeline
+  # gaps, degrade to INSUFFICIENT_DATA rather than driving the remediator.
+  treat_missing_data        = "missing"
   alarm_description         = "Memory usage exceeded ${var.memory_threshold}% for 2 consecutive minutes"
   alarm_actions             = [aws_sns_topic.alerts.arn]
   ok_actions                = [aws_sns_topic.alerts.arn]

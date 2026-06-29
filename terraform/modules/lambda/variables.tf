@@ -8,8 +8,8 @@ variable "asg_name" {
   type        = string
 }
 
-variable "alerts_sns_topic_arn" {
-  description = "ARN of the SNS topic that triggers the remediator Lambda"
+variable "insights_sns_topic_arn" {
+  description = "ARN of the DevOps Guru insights SNS topic that triggers the RCA summariser Lambda"
   type        = string
 }
 
@@ -54,7 +54,7 @@ variable "rca_summariser_zip_hash" {
 }
 
 variable "aws_region" {
-  description = "AWS region (passed to Lambda as AWS_REGION env var)"
+  description = "AWS region, used to build SES/Bedrock IAM resource ARNs. Not set as a Lambda env var — AWS_REGION is reserved and injected by the runtime; boto3 reads it automatically."
   type        = string
   default     = "eu-west-1"
 }

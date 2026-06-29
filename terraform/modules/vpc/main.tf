@@ -161,3 +161,16 @@ resource "aws_vpc_endpoint" "cloudwatch" {
 
   tags = { Name = "${var.name_prefix}-CloudWatch-Endpoint" }
 }
+
+# ── CloudWatch Logs endpoint (chaos.py runs on-instance and writes log events) ─
+
+resource "aws_vpc_endpoint" "logs" {
+  vpc_id              = aws_vpc.this.id
+  service_name        = "com.amazonaws.${local.region}.logs"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.endpoints.id]
+  private_dns_enabled = true
+
+  tags = { Name = "${var.name_prefix}-Logs-Endpoint" }
+}

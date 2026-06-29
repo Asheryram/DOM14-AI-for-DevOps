@@ -1,61 +1,75 @@
-# DOM14 AI for DevOps
+# DOM14 AI for DevOps — TechStream Self-Healing System
 
-This repository contains a self-healing TechStream demo system with:
+A fully automated self-healing pipeline for a Flask data-ingestion service on AWS,
+provisioned end to end with Terraform. When the service degrades, the system detects
+the anomaly, remediates it automatically, and emails an AI-generated root-cause
+analysis — with no human intervention.
 
-- A Python Flask ingest app instrumented with Prometheus metrics
-- Monitoring configuration for Prometheus / Grafana / CloudWatch
-- Chaos injection tools for HTTP 500, CPU saturation, and memory leak scenarios
-- AWS Terraform stubs for CloudWatch alarming, SNS, IAM policy, and DevOps Guru
-- Lambda remediation and RCA summariser skeletons
-- Verification and insight parsing scripts
+## What's in here
 
-## Root structure
+- **Flask ingest app** (`app/app.py`) — instrumented with Prometheus metrics and a
+  background thread that publishes Golden-Signal metrics (`5xx_error_rate`,
+  `mem_used_percent`) to CloudWatch.
+- **Self-hosted monitoring** — a single EC2 instance running **Prometheus** (binary,
+  port 9090) and **Grafana** (RPM, port 3000). Prometheus uses EC2 service discovery
+  to scrape both the app (`:8000`) and `node_exporter` (`:9100`) on every ASG instance.
+- **Self-healing remediation** — 3 CloudWatch alarms → an EventBridge rule →
+  a Remediator Lambda that either scales the ASG out or restarts the `techstream`
+  systemd unit via SSM.
+- **AI RCA** — Amazon DevOps Guru insights → a dedicated SNS topic → an RCA Summariser
+  Lambda that calls Amazon Bedrock and emails an HTML report via SES.
+- **Chaos engineering** (`chaos/`) — three fault-injection scenarios run on an app
+  instance via SSM Run Command, plus an end-to-end verification script.
+- **Tests + CI** — a pytest suite under `tests/` and a GitHub Actions workflow.
 
-- `app.py` — Flask app with Prometheus instrumentation
-- `requirements.txt` — Python dependencies
-- `prometheus.yml` — Prometheus scrape config
-- `grafana_dashboard.json` — Grafana dashboard stub
-- `cloudwatch-agent.json` — CloudWatch agent config
-- `chaos.py` — chaos injection runner
-- `remediator.py` — Lambda remediation logic
-- `rca_summariser.py` — Lambda RCA summariser logic
-- `parse_insight.py` — DevOps Guru insight parsing helper
-- `verify_healing.sh` — end-to-end verification scaffold
-- `terraform/` — grouped Terraform modules and resources
-- `docs/` — project documentation
+Everything runs in **eu-west-1**. Both the app instances and the monitoring instance
+run **Amazon Linux 2023**. There is **no ALB, no NAT gateway, and no Docker** anywhere
+in the system.
+
+## Repository structure
+
+- `app/app.py` — Flask ingest API with Prometheus instrumentation
+- `app/requirements.txt` — app runtime dependencies
+- `lambda/remediator/handler.py` — decides: scale out or SSM-restart the service
+- `lambda/rca_summariser/handler.py` — Bedrock RCA + SES HTML email
+- `lambda/parse_insight/handler.py` — DevOps Guru insight parsing helper
+- `monitoring/grafana/` — provisioned datasource + the 6-panel Golden Signals dashboard
+- `chaos/chaos.py` — three chaos scenarios (`http_500`, `cpu_spike`, `memory_leak`)
+- `chaos/verify_healing.sh` — automated inject → heal verification driven over SSM
+- `tests/` — pytest suite (`test_app.py`, `test_remediator.py`, `test_rca_summariser.py`)
+- `requirements-dev.txt` — test dependencies (app deps + pytest)
+- `.github/workflows/ci.yml` — pytest, `terraform fmt`/`validate`, and a tfsec scan
+- `terraform/` — root module and child modules (`vpc`, `compute`, `asg`, `alarms`,
+  `lambda`, `devops_guru`, `monitoring`)
+- `docs/` — this README, the architecture overview, and the full lab walkthrough
 
 ## Getting started
 
-1. Install dependencies:
+Follow the full lab in [docs/WALKTHROUGH.md](WALKTHROUGH.md). The short version:
+
+1. Verify an SES email identity and confirm Bedrock access (`anthropic.claude-sonnet-4-6`).
+2. `cd terraform`, copy `terraform.tfvars.example` to `terraform.tfvars`, fill it in.
+3. `terraform init && terraform apply` — provisions ~55–60 resources.
+4. Open Grafana at the `grafana_url` output, then inject chaos and watch the system heal.
+
+> `pip3` must work on your machine before `terraform apply`: a `null_resource` stages
+> Python wheels (and the `node_exporter` binary) to a private S3 bucket, which the
+> private app instances pull via the S3 gateway endpoint — they never touch the internet.
+
+## Run the tests
 
 ```bash
-python -m pip install -r requirements.txt
+pip install -r requirements-dev.txt
+pytest
 ```
 
-2. Run the app locally:
-
-```bash
-python app.py
-```
-
-3. Run a basic chaos test against a local app:
-
-```bash
-python chaos.py --scenario http_500 --alb-dns localhost:8000 --region us-east-1
-```
-
-## Terraform layout
-
-Terraform files are grouped under `terraform/`:
-
-- `main.tf` — AWS provider and ASG placeholder
-- `cloudwatch.tf` — CloudWatch alarm
-- `sns.tf` — SNS topic and email subscriptions
-- `iam.tf` — Lambda IAM policy
-- `devops_guru.tf` — DevOps Guru resource collection
+This runs the 16-test suite covering the Flask endpoints, the remediator decision logic,
+and the RCA summariser (including the Bedrock-unavailable fallback). The same checks run
+in CI on every push and pull request, alongside `terraform fmt -check`/`validate` and a
+tfsec IaC security scan.
 
 ## Notes
 
-- `grafana_dashboard.json` is a stub and should be replaced with a full dashboard export.
-- AWS resources are placeholders; complete configuration and actual ARNs are needed before deployment.
-- SES requires verified identities in sandbox mode.
+- SES is in sandbox mode on new accounts — verify every sender/recipient address first.
+- If Bedrock is blocked by an organizational SCP, the RCA email still arrives: the Lambda
+  falls back to a raw-insight summary and flags it with a yellow banner.

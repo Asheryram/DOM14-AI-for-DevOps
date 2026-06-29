@@ -18,6 +18,17 @@ variable "vpc_cidr" {
   default     = "10.0.0.0/16"
 }
 
+variable "az_count" {
+  description = "Number of Availability Zones to spread subnets across (multi-AZ assumed)"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.az_count >= 2
+    error_message = "az_count must be at least 2 — the ASG and VPC endpoints assume multi-AZ."
+  }
+}
+
 # ── Compute ───────────────────────────────────────────────────────────────────
 
 variable "instance_type" {
@@ -50,6 +61,11 @@ variable "asg_desired_capacity" {
   description = "Initial desired capacity of the ASG"
   type        = number
   default     = 2
+
+  validation {
+    condition     = var.asg_desired_capacity >= var.asg_min_size && var.asg_desired_capacity <= var.asg_max_size
+    error_message = "asg_desired_capacity must be between asg_min_size and asg_max_size."
+  }
 }
 
 # ── Notifications ─────────────────────────────────────────────────────────────

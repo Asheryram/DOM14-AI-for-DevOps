@@ -9,6 +9,7 @@ module "vpc" {
 
   name_prefix = local.name_prefix
   cidr_block  = var.vpc_cidr
+  az_count    = var.az_count
 }
 
 # ── EC2 launch template + instance profile ────────────────────────────────────
@@ -31,6 +32,7 @@ module "asg" {
 
   name                      = "${local.name_prefix}-ASG"
   launch_template_id        = module.compute.launch_template_id
+  launch_template_version   = module.compute.launch_template_latest_version
   subnet_ids                = module.vpc.private_subnet_ids
   min_size                  = var.asg_min_size
   max_size                  = var.asg_max_size
@@ -68,7 +70,7 @@ module "lambda" {
 
   name_prefix             = local.name_prefix
   asg_name                = module.asg.name
-  alerts_sns_topic_arn    = module.alarms.sns_topic_arn
+  insights_sns_topic_arn  = module.alarms.insights_topic_arn
   ses_from                = var.ses_from_email
   ses_to                  = var.incidents_email
   oncall                  = var.oncall_email
@@ -86,7 +88,7 @@ module "devops_guru" {
   source = "./modules/devops_guru"
 
   stack_name    = var.cloudformation_stack_name
-  sns_topic_arn = module.alarms.sns_topic_arn
+  sns_topic_arn = module.alarms.insights_topic_arn
 }
 
 # ── Self-hosted Prometheus + Grafana on EC2 ───────────────────────────────────

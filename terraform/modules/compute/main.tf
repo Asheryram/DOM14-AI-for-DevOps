@@ -1,12 +1,15 @@
-# ── Latest Ubuntu 24.04 LTS AMI ──────────────────────────────────────────────
+# ── Latest Amazon Linux 2023 AMI ──────────────────────────────────────────────
+# AL2023 is required for the no-NAT private-subnet design: its dnf repos are
+# served from in-region S3 (reachable via the S3 gateway endpoint) and the SSM
+# agent is preinstalled, so instances need no internet path to bootstrap.
 
-data "aws_ami" "ubuntu" {
+data "aws_ami" "al2023" {
   most_recent = true
-  owners      = ["099720109477"] # Canonical
+  owners      = ["amazon"]
 
   filter {
     name   = "name"
-    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
+    values = ["al2023-ami-*-x86_64"]
   }
 
   filter {
@@ -45,27 +48,41 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "packages" {
   }
 }
 
-# Download wheels locally then upload to S3 — re-runs only when requirements.txt changes
-resource "null_resource" "pip_wheels" {
+# Stage offline artifacts to S3 so the private app instances (no NAT, no internet)
+# can install everything via the S3 gateway endpoint:
+#   - Python wheels built for the instance interpreter (cp311 / manylinux2014)
+#   - node_exporter binary for host CPU/memory metrics scraped by Prometheus
+# Re-runs only when requirements.txt or the node_exporter version changes.
+resource "null_resource" "stage_artifacts" {
   triggers = {
-    requirements = filemd5("${path.module}/../../../app/requirements.txt")
-    bucket       = aws_s3_bucket.packages.id
+    requirements          = filemd5("${path.module}/../../../app/requirements.txt")
+    node_exporter_version = var.node_exporter_version
+    bucket                = aws_s3_bucket.packages.id
   }
 
   provisioner "local-exec" {
     interpreter = ["bash", "-c"]
     command     = <<-EOT
-      set -e
-      rm -rf /tmp/ts_wheels && mkdir /tmp/ts_wheels
+      set -euo pipefail
+      rm -rf /tmp/ts_wheels && mkdir -p /tmp/ts_wheels
+
+      # Python wheels — built for the instance interpreter (Python 3.11 on AL2023),
+      # NOT the local machine's Python. Pure-python deps download as universal wheels.
       pip3 download \
         --platform manylinux2014_x86_64 \
         --python-version 311 \
         --implementation cp \
         --only-binary=:all: \
-        flask "prometheus-flask-exporter" prometheus-client \
-        requests boto3 psutil gunicorn \
+        -r "${path.module}/../../../app/requirements.txt" \
         -d /tmp/ts_wheels
       aws s3 sync /tmp/ts_wheels/ "s3://${aws_s3_bucket.packages.id}/wheels/" \
+        --region ${var.aws_region} --delete
+
+      # node_exporter binary
+      NE="node_exporter-${var.node_exporter_version}.linux-amd64"
+      curl -fsSL "https://github.com/prometheus/node_exporter/releases/download/v${var.node_exporter_version}/$${NE}.tar.gz" \
+        -o "/tmp/$${NE}.tar.gz"
+      aws s3 cp "/tmp/$${NE}.tar.gz" "s3://${aws_s3_bucket.packages.id}/node_exporter/$${NE}.tar.gz" \
         --region ${var.aws_region}
     EOT
   }
@@ -77,26 +94,23 @@ resource "null_resource" "pip_wheels" {
 
 resource "aws_security_group" "app" {
   name        = "${var.name_prefix}-App"
-  description = "TechStream app instances - Prometheus scrape and outbound"
+  description = "TechStream app instances - in-VPC metrics scrape and outbound only"
   vpc_id      = var.vpc_id
 
   ingress {
-    description = "Prometheus metrics scrape from within VPC"
+    description = "Flask app + /metrics scrape from within VPC"
     from_port   = 8000
     to_port     = 8000
     protocol    = "tcp"
     cidr_blocks = [var.vpc_cidr]
   }
 
-  dynamic "ingress" {
-    for_each = var.key_name != "" ? [1] : []
-    content {
-      description = "SSH"
-      from_port   = 22
-      to_port     = 22
-      protocol    = "tcp"
-      cidr_blocks = ["0.0.0.0/0"]
-    }
+  ingress {
+    description = "node_exporter host metrics scrape from within VPC"
+    from_port   = 9100
+    to_port     = 9100
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
   }
 
   egress {
@@ -160,16 +174,17 @@ resource "aws_iam_instance_profile" "app" {
 
 locals {
   user_data = base64encode(templatefile("${path.module}/user_data.sh.tpl", {
-    aws_region      = var.aws_region
-    name_prefix     = var.name_prefix
-    app_py_b64      = base64encode(file("${path.module}/../../../app/app.py"))
-    packages_bucket = aws_s3_bucket.packages.id
+    aws_region            = var.aws_region
+    name_prefix           = var.name_prefix
+    app_py_b64            = base64encode(file("${path.module}/../../../app/app.py"))
+    packages_bucket       = aws_s3_bucket.packages.id
+    node_exporter_version = var.node_exporter_version
   }))
 }
 
 resource "aws_launch_template" "app" {
   name_prefix   = "${var.name_prefix}-App-"
-  image_id      = data.aws_ami.ubuntu.id
+  image_id      = data.aws_ami.al2023.id
   instance_type = var.instance_type
 
   iam_instance_profile {
@@ -183,7 +198,7 @@ resource "aws_launch_template" "app" {
 
   metadata_options {
     http_tokens                 = "required"
-    http_put_response_hop_limit = 2
+    http_put_response_hop_limit = 1
   }
 
   key_name  = var.key_name != "" ? var.key_name : null
@@ -199,6 +214,6 @@ resource "aws_launch_template" "app" {
 
   lifecycle {
     create_before_destroy = true
-    replace_triggered_by  = [null_resource.pip_wheels]
+    replace_triggered_by  = [null_resource.stage_artifacts]
   }
 }

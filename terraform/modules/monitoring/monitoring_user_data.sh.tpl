@@ -1,34 +1,44 @@
 #!/bin/bash
-exec > /var/log/cloud-init-output.log 2>&1
+set -euo pipefail
+exec > >(tee /var/log/cloud-init-output.log | logger -t user-data) 2>&1
 
-# ── SSM Agent ─────────────────────────────────────────────────────────────────
-snap install amazon-ssm-agent --classic
-systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service
-systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service
+PROM_VERSION="2.51.0"
 
-# ── Docker ────────────────────────────────────────────────────────────────────
-apt-get update -y
-apt-get install -y ca-certificates curl gnupg
+# Retry helper for network-dependent steps so a brief egress gap at first boot
+# (before the EIP attaches) does not abort the whole bootstrap under `set -e`.
+retry() {
+  local n=0 max=5 delay=15
+  until "$@"; do
+    n=$((n + 1))
+    if [ "$n" -ge "$max" ]; then
+      echo "command failed after $max attempts: $*" >&2
+      return 1
+    fi
+    echo "attempt $n failed: $* - retrying in $${delay}s" >&2
+    sleep "$delay"
+  done
+}
 
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-chmod a+r /etc/apt/keyrings/docker.gpg
+# ── System packages ───────────────────────────────────────────────────────────
+# This instance is in a public subnet (internet via IGW), so dnf + the Grafana
+# RPM + the Prometheus tarball download directly. SSM agent is preinstalled.
+retry dnf install -y wget tar gzip
 
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-  > /etc/apt/sources.list.d/docker.list
+# ── Prometheus ────────────────────────────────────────────────────────────────
+retry wget -q "https://github.com/prometheus/prometheus/releases/download/v$${PROM_VERSION}/prometheus-$${PROM_VERSION}.linux-amd64.tar.gz" \
+  -O /tmp/prom.tar.gz
+tar -xzf /tmp/prom.tar.gz -C /opt/
+ln -sfn "/opt/prometheus-$${PROM_VERSION}.linux-amd64" /opt/prometheus
+mkdir -p /opt/prometheus/data
+useradd --system --no-create-home --shell /usr/sbin/nologin prometheus || true
 
-apt-get update -y
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-
-systemctl enable --now docker
-
-# ── Prometheus config ─────────────────────────────────────────────────────────
-mkdir -p /opt/monitoring
-
-cat > /opt/monitoring/prometheus.yml <<PROMCFG
+# Two EC2 service-discovery jobs over the same ASG:
+#   techstream_app  -> Flask /metrics on :8000
+#   node            -> node_exporter host metrics on :9100
+# Both relabel instance_id so dashboard `by (instance_id)` aggregations join.
+cat > /opt/prometheus/prometheus.yml <<PROMCFG
 global:
-  scrape_interval: 15s
+  scrape_interval:     15s
   evaluation_interval: 15s
 
 scrape_configs:
@@ -45,26 +55,64 @@ scrape_configs:
         target_label: instance_id
       - source_labels: [__meta_ec2_private_ip]
         target_label: private_ip
+
+  - job_name: node
+    ec2_sd_configs:
+      - region: ${aws_region}
+        port: 9100
+        filters:
+          - name: tag:aws:autoscaling:groupName
+            values:
+              - ${asg_name}
+    relabel_configs:
+      - source_labels: [__meta_ec2_instance_id]
+        target_label: instance_id
+      - source_labels: [__meta_ec2_private_ip]
+        target_label: private_ip
 PROMCFG
 
-# ── Grafana provisioning ──────────────────────────────────────────────────────
-mkdir -p /opt/monitoring/grafana/provisioning/datasources
-mkdir -p /opt/monitoring/grafana/provisioning/dashboards
-mkdir -p /opt/monitoring/grafana/dashboards
+chown -R prometheus:prometheus /opt/prometheus/ "/opt/prometheus-$${PROM_VERSION}.linux-amd64"
 
-cat > /opt/monitoring/grafana/provisioning/datasources/prometheus.yaml <<DSCFG
+cat > /etc/systemd/system/prometheus.service <<SYSD
+[Unit]
+Description=Prometheus
+After=network.target
+
+[Service]
+User=prometheus
+ExecStart=/opt/prometheus/prometheus \
+  --config.file=/opt/prometheus/prometheus.yml \
+  --storage.tsdb.path=/opt/prometheus/data \
+  --storage.tsdb.retention.time=15d \
+  --web.enable-lifecycle
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SYSD
+
+systemctl daemon-reload
+systemctl enable --now prometheus
+
+# ── Grafana ───────────────────────────────────────────────────────────────────
+retry dnf install -y https://dl.grafana.com/oss/release/grafana-10.4.2-1.x86_64.rpm
+
+mkdir -p /etc/grafana/provisioning/datasources
+cat > /etc/grafana/provisioning/datasources/prometheus.yaml <<DSCFG
 apiVersion: 1
 datasources:
   - name: Prometheus
     type: prometheus
     uid: prometheus
-    url: http://prometheus:9090
+    url: http://localhost:9090
     access: proxy
     isDefault: true
     editable: false
 DSCFG
 
-cat > /opt/monitoring/grafana/provisioning/dashboards/provider.yaml <<DASHPROV
+mkdir -p /etc/grafana/provisioning/dashboards
+cat > /etc/grafana/provisioning/dashboards/provider.yaml <<DASHPROV
 apiVersion: 1
 providers:
   - name: TechStream
@@ -74,46 +122,20 @@ providers:
       path: /var/lib/grafana/dashboards
 DASHPROV
 
-cat > /opt/monitoring/grafana/dashboards/techstream_golden_signals.json << 'DASHEOF'
-${dashboard_json}
-DASHEOF
+mkdir -p /var/lib/grafana/dashboards
+echo "${dashboard_json_b64}" | base64 -d \
+  > /var/lib/grafana/dashboards/techstream_golden_signals.json
+chown -R grafana:grafana /var/lib/grafana/dashboards /etc/grafana/provisioning
 
-# ── Docker Compose ────────────────────────────────────────────────────────────
-cat > /opt/monitoring/docker-compose.yml <<COMPOSE
-services:
-  prometheus:
-    image: prom/prometheus:v2.51.0
-    restart: unless-stopped
-    ports:
-      - "9090:9090"
-    volumes:
-      - /opt/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.retention.time=15d
-      - --web.enable-lifecycle
+mkdir -p /etc/systemd/system/grafana-server.service.d
+cat > /etc/systemd/system/grafana-server.service.d/override.conf <<GENV
+[Service]
+Environment=GF_SECURITY_ADMIN_PASSWORD=${grafana_admin_password}
+Environment=GF_USERS_ALLOW_SIGN_UP=false
+Environment=GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/techstream_golden_signals.json
+GENV
 
-  grafana:
-    image: grafana/grafana:10.4.2
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${grafana_admin_password}
-      - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/techstream_golden_signals.json
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - /opt/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-      - /opt/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
-
-volumes:
-  prometheus_data:
-  grafana_data:
-COMPOSE
-
-cd /opt/monitoring
-docker compose up -d
+systemctl daemon-reload
+systemctl enable --now grafana-server
 
 echo "DONE: Monitoring stack started"

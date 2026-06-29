@@ -3,19 +3,19 @@ locals {
     aws_region             = var.aws_region
     asg_name               = var.asg_name
     grafana_admin_password = var.grafana_admin_password
-    dashboard_json         = file("${path.module}/../../../monitoring/grafana/dashboards/techstream_golden_signals.json")
+    dashboard_json_b64     = base64encode(file("${path.module}/../../../monitoring/grafana/dashboards/techstream_golden_signals.json"))
   }))
 }
 
-# ── Latest Ubuntu 24.04 LTS AMI ──────────────────────────────────────────────
+# ── Latest Amazon Linux 2023 AMI ──────────────────────────────────────────────
 
-data "aws_ami" "ubuntu" {
+data "aws_ami" "al2023" {
   most_recent = true
-  owners      = ["099720109477"] # Canonical
+  owners      = ["amazon"]
 
   filter {
     name   = "name"
-    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
+    values = ["al2023-ami-*-x86_64"]
   }
 
   filter {
@@ -91,16 +91,9 @@ resource "aws_security_group" "monitoring" {
     cidr_blocks = [var.vpc_cidr]
   }
 
-  dynamic "ingress" {
-    for_each = var.key_name != "" ? [1] : []
-    content {
-      description = "SSH"
-      from_port   = 22
-      to_port     = 22
-      protocol    = "tcp"
-      cidr_blocks = ["0.0.0.0/0"]
-    }
-  }
+  # SSH is intentionally not opened — the instance is managed via SSM Session
+  # Manager (AmazonSSMManagedInstanceCore is attached). This avoids exposing
+  # port 22 on a public host. Use `aws ssm start-session` for shell access.
 
   egress {
     from_port   = 0
@@ -113,17 +106,18 @@ resource "aws_security_group" "monitoring" {
 # ── EC2 instance ──────────────────────────────────────────────────────────────
 
 resource "aws_instance" "monitoring" {
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = var.instance_type
-  subnet_id              = var.subnet_id
-  vpc_security_group_ids = [aws_security_group.monitoring.id]
-  iam_instance_profile   = aws_iam_instance_profile.monitoring.name
-  key_name               = var.key_name != "" ? var.key_name : null
-  user_data_base64       = local.user_data
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = var.instance_type
+  subnet_id                   = var.subnet_id
+  vpc_security_group_ids      = [aws_security_group.monitoring.id]
+  iam_instance_profile        = aws_iam_instance_profile.monitoring.name
+  key_name                    = var.key_name != "" ? var.key_name : null
+  user_data_base64            = local.user_data
+  associate_public_ip_address = true # needed at first boot to fetch Prometheus/Grafana before the EIP attaches
 
   metadata_options {
     http_tokens                 = "required"
-    http_put_response_hop_limit = 2
+    http_put_response_hop_limit = 1
   }
 
   tags = {

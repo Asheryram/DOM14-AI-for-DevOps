@@ -8,6 +8,11 @@ variable "launch_template_id" {
   type        = string
 }
 
+variable "launch_template_version" {
+  description = "Launch template version to run (pass the latest version so changes trigger an instance refresh)"
+  type        = string
+}
+
 variable "subnet_ids" {
   description = "List of subnet IDs for the ASG"
   type        = list(string)
