@@ -62,7 +62,7 @@ By the end of this lab you will have:
 | Tool | Min version | Check |
 |------|-------------|-------|
 | AWS CLI v2 | 2.x | `aws --version` |
-| Terraform | 1.5 | `terraform --version` |
+| Terraform | 1.9 | `terraform --version` |
 | Python 3 | 3.11 | `python3 --version` |
 | Git | any | `git --version` |
 
@@ -972,7 +972,8 @@ There is no `--alb-dns` — the script targets the instance directly via SSM. Fl
 | `--alarm-name` | `TechStream-prod-ErrorRate-High` | Alarm to poll |
 
 ```bash
-# From the repo root — requires the AWS CLI, SSM access to the instances, and python3
+# From the repo root — requires the AWS CLI and SSM access to the instances.
+# Best run from a Linux/macOS shell or AWS CloudShell (uses bash, base64, mktemp).
 chmod +x chaos/verify_healing.sh
 
 ./chaos/verify_healing.sh --region eu-west-1
