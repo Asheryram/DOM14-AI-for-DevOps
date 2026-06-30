@@ -23,7 +23,9 @@ incidents_email = "incidents@techstream.io"
 ses_from_email  = "devops-guru@techstream.io"   # must be verified in SES
 
 # ── Bedrock model for RCA ─────────────────────────────────────────────────────
-bedrock_model_id = "anthropic.claude-sonnet-4-6"
+# Claude 4.x needs a cross-region INFERENCE PROFILE (the "eu." prefix), not the
+# bare foundation-model id. List options: aws bedrock list-inference-profiles --region eu-west-1
+bedrock_model_id = "eu.anthropic.claude-sonnet-4-6"
 
 # ── DevOps Guru ───────────────────────────────────────────────────────────────
 cloudformation_stack_name = "TechStream-Prod"

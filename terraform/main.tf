@@ -1,5 +1,10 @@
 locals {
   name_prefix = "TechStream-${var.environment}"
+
+  # DevOps Guru tag-based resource boundary. The key MUST start with "Devops-guru-".
+  # Applied to every resource via the provider default_tags so DevOps Guru analyzes
+  # this Terraform-built stack (there is no CloudFormation stack to point it at).
+  app_boundary_tag = "Devops-guru-techstream"
 }
 
 # ── Networking ────────────────────────────────────────────────────────────────
@@ -87,8 +92,9 @@ module "lambda" {
 module "devops_guru" {
   source = "./modules/devops_guru"
 
-  stack_name    = var.cloudformation_stack_name
-  sns_topic_arn = module.alarms.insights_topic_arn
+  app_boundary_key = local.app_boundary_tag
+  tag_value        = var.environment
+  sns_topic_arn    = module.alarms.insights_topic_arn
 }
 
 # ── Self-hosted Prometheus + Grafana on EC2 ───────────────────────────────────

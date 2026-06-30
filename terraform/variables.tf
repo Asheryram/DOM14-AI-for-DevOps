@@ -91,9 +91,9 @@ variable "ses_from_email" {
 # ── AI / Bedrock ──────────────────────────────────────────────────────────────
 
 variable "bedrock_model_id" {
-  description = "Amazon Bedrock model ID for RCA summarisation"
+  description = "Amazon Bedrock model ID for RCA summarisation. Claude 4.x requires a cross-region inference profile (the 'eu.' prefix in eu-west-1), NOT the bare foundation-model id."
   type        = string
-  default     = "anthropic.claude-sonnet-4-6"
+  default     = "eu.anthropic.claude-sonnet-4-6"
 }
 
 # ── DevOps Guru ───────────────────────────────────────────────────────────────

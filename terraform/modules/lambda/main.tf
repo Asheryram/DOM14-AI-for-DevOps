@@ -58,9 +58,16 @@ data "aws_iam_policy_document" "permissions" {
   }
 
   statement {
-    sid       = "Bedrock"
-    actions   = ["bedrock:InvokeModel"]
-    resources = ["arn:aws:bedrock:${var.aws_region}::foundation-model/*"]
+    sid     = "Bedrock"
+    actions = ["bedrock:InvokeModel"]
+    # Covers both a bare foundation-model id AND a cross-region inference profile
+    # (e.g. "eu.anthropic.claude-..."). An inference profile fans the call out to
+    # the underlying foundation models in several regions, so the foundation-model
+    # ARN is wildcarded across regions.
+    resources = [
+      "arn:aws:bedrock:*::foundation-model/*",
+      "arn:aws:bedrock:*:*:inference-profile/*",
+    ]
   }
 }
 

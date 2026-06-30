@@ -33,6 +33,8 @@ provider "aws" {
       Project     = "TechStream"
       Environment = var.environment
       ManagedBy   = "Terraform"
+      # DevOps Guru tag-based resource boundary (key must start with "Devops-guru-").
+      (local.app_boundary_tag) = var.environment
     }
   }
 }
