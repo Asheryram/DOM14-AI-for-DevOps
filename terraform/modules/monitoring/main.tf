@@ -7,7 +7,9 @@ locals {
   }))
 }
 
-# ── Latest Amazon Linux 2023 AMI ──────────────────────────────────────────────
+# ── Latest Amazon Linux 2023 AMI (standard, NOT minimal) ──────────────────────
+# The "al2023-ami-minimal-*" variant ships WITHOUT the SSM agent; excluding it
+# keeps the instance manageable over SSM (PingStatus: Online).
 
 data "aws_ami" "al2023" {
   most_recent = true
@@ -15,7 +17,7 @@ data "aws_ami" "al2023" {
 
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    values = ["al2023-ami-2023.*-x86_64"]
   }
 
   filter {
@@ -72,15 +74,15 @@ resource "aws_iam_instance_profile" "monitoring" {
 
 resource "aws_security_group" "monitoring" {
   name        = "${var.name_prefix}-Monitoring"
-  description = "Grafana (public) and Prometheus (VPC-internal)"
+  description = "Grafana (allowed CIDRs only) and Prometheus (VPC-internal)"
   vpc_id      = var.vpc_id
 
   ingress {
-    description = "Grafana UI"
+    description = "Grafana UI - restricted to allowed CIDRs"
     from_port   = 3000
     to_port     = 3000
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = var.allowed_cidrs
   }
 
   ingress {

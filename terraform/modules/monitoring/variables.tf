@@ -19,6 +19,16 @@ variable "vpc_cidr" {
   type        = string
 }
 
+variable "allowed_cidrs" {
+  description = "CIDR blocks allowed to reach the Grafana UI on port 3000 (e.g. your public IP as a /32). Prometheus :9090 stays VPC-internal regardless."
+  type        = list(string)
+
+  validation {
+    condition     = length(var.allowed_cidrs) > 0
+    error_message = "Provide at least one CIDR (e.g. [\"203.0.113.5/32\"]) — leaving Grafana open to the world is not allowed."
+  }
+}
+
 variable "subnet_id" {
   description = "Public subnet ID for the monitoring EC2 instance"
   type        = string

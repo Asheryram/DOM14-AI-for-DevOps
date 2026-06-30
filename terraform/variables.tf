@@ -111,3 +111,8 @@ variable "grafana_admin_password" {
   type        = string
   sensitive   = true
 }
+
+variable "monitoring_allowed_cidrs" {
+  description = "CIDRs allowed to reach the Grafana UI (:3000) on the public monitoring instance — set to your own IP, e.g. [\"203.0.113.5/32\"]. Get it with: curl -s https://checkip.amazonaws.com"
+  type        = list(string)
+}

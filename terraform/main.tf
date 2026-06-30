@@ -103,5 +103,6 @@ module "monitoring" {
   subnet_id              = module.vpc.public_subnet_ids[0]
   asg_name               = module.asg.name
   grafana_admin_password = var.grafana_admin_password
+  allowed_cidrs          = var.monitoring_allowed_cidrs
   key_name               = var.key_name
 }

@@ -30,3 +30,7 @@ cloudformation_stack_name = "TechStream-Prod"
 
 # ── Grafana — REQUIRED ────────────────────────────────────────────────────────
 grafana_admin_password = "change-me-before-apply"
+
+# CIDRs allowed to open the Grafana UI (:3000). Lock this to your own IP.
+# Find it with:  curl -s https://checkip.amazonaws.com    (then append /32)
+monitoring_allowed_cidrs = ["203.0.113.5/32"]   # ← CHANGE THIS to your IP/32

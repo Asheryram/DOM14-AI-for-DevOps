@@ -1,7 +1,9 @@
-# ── Latest Amazon Linux 2023 AMI ──────────────────────────────────────────────
+# ── Latest Amazon Linux 2023 AMI (standard, NOT minimal) ──────────────────────
 # AL2023 is required for the no-NAT private-subnet design: its dnf repos are
 # served from in-region S3 (reachable via the S3 gateway endpoint) and the SSM
 # agent is preinstalled, so instances need no internet path to bootstrap.
+# The pattern excludes the "al2023-ami-minimal-*" variant, which ships WITHOUT
+# the SSM agent and would leave instances unmanageable (PingStatus: Offline).
 
 data "aws_ami" "al2023" {
   most_recent = true
@@ -9,7 +11,7 @@ data "aws_ami" "al2023" {
 
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    values = ["al2023-ami-2023.*-x86_64"]
   }
 
   filter {
