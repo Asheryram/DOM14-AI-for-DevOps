@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TechStream Self-Healing System — Walkthrough</title>
+<style>
+  :root{
+    --bg:#0f1623; --panel:#162033; --ink:#e7edf5; --muted:#9fb0c3;
+    --line:#26344a; --accent:#4f8cff; --ok:#28c08a; --warn:#f0b429; --bad:#e5484d;
+    --code:#0b1220;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:16px/1.65 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  .wrap{max-width:960px;margin:0 auto;padding:32px 20px 80px}
+  header{border-bottom:1px solid var(--line);padding-bottom:24px;margin-bottom:8px}
+  h1{font-size:30px;line-height:1.2;margin:0 0 6px}
+  .sub{color:var(--muted);font-size:16px;margin:0}
+  .meta{color:var(--muted);font-size:13px;margin-top:14px}
+  h2{font-size:22px;margin:44px 0 6px;padding-top:14px;border-top:1px solid var(--line)}
+  h3{font-size:17px;margin:26px 0 6px;color:#cfe0f5}
+  p{margin:10px 0}
+  .lead{font-size:17px;color:#d7e2f0}
+  code{background:var(--code);padding:2px 6px;border-radius:5px;font-size:13px;
+       font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#bcd3ff}
+  .pill{display:inline-block;font-size:12px;font-weight:600;padding:2px 10px;border-radius:999px;
+        border:1px solid var(--line);color:var(--muted);margin-right:6px}
+  .pill.ok{color:var(--ok);border-color:#1c5a45}
+  .pill.bad{color:var(--bad);border-color:#5a242a}
+  .pill.warn{color:var(--warn);border-color:#5a4a1c}
+  figure{margin:18px 0 6px;background:var(--panel);border:1px solid var(--line);
+         border-radius:12px;padding:12px;box-shadow:0 6px 24px rgba(0,0,0,.25)}
+  figure img{display:block;width:100%;height:auto;border-radius:8px;border:1px solid var(--line)}
+  figcaption{color:var(--muted);font-size:13px;margin-top:10px;padding:0 4px}
+  figcaption b{color:#cfe0f5}
+  .flow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:var(--panel);
+        border:1px solid var(--line);border-radius:12px;padding:16px;margin:16px 0}
+  .node{background:#0d1830;border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:13px}
+  .arrow{color:var(--accent);font-weight:700}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:680px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .card h3{margin-top:0}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14px}
+  th,td{border:1px solid var(--line);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:#0d1830;color:#cfe0f5}
+  .step{display:flex;gap:12px;align-items:flex-start}
+  .num{flex:0 0 34px;height:34px;width:34px;border-radius:50%;background:var(--accent);
+       color:#fff;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .note{background:#0d1830;border-left:3px solid var(--accent);border-radius:0 8px 8px 0;
+        padding:10px 14px;color:#cfe0f5;font-size:14px;margin:14px 0}
+  footer{margin-top:50px;border-top:1px solid var(--line);padding-top:18px;color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>TechStream Self-Healing System</h1>
+  <p class="sub">A visual walkthrough — how the platform detects a failure, fixes itself, and explains the incident, with no human in the loop.</p>
+  <p class="meta">Prepared by Asher Tetteh-Abotsi · Region eu-west-1 · Infrastructure as Code (Terraform) · Evidence captured from the live deployment</p>
+</header>
+
+<p class="lead">TechStream is a Flask data-ingestion API running on a private EC2 Auto Scaling Group. Its health is watched continuously; when it degrades, the system <b>detects</b> the fault (CloudWatch alarms), <b>remediates</b> it automatically (EventBridge&nbsp;→&nbsp;Lambda), and <b>explains</b> it (DevOps Guru&nbsp;→&nbsp;Bedrock&nbsp;→&nbsp;email). This page walks the full loop using screenshots captured during a real chaos test.</p>
+
+<h2>The self-healing loop</h2>
+<div class="flow">
+  <span class="node">App &amp; node_exporter<br>(private ASG)</span>
+  <span class="arrow">→</span>
+  <span class="node">CloudWatch<br>Alarms ×3</span>
+  <span class="arrow">→</span>
+  <span class="node">EventBridge<br>(state = ALARM)</span>
+  <span class="arrow">→</span>
+  <span class="node">Remediator<br>Lambda</span>
+  <span class="arrow">→</span>
+  <span class="node">SSM restart /<br>ASG scale-out</span>
+</div>
+<div class="flow">
+  <span class="node">DevOps Guru</span>
+  <span class="arrow">→</span>
+  <span class="node">SNS<br>-insights</span>
+  <span class="arrow">→</span>
+  <span class="node">RCA Summariser<br>Lambda</span>
+  <span class="arrow">→</span>
+  <span class="node">Bedrock (Claude)<br>+ SES email</span>
+</div>
+<p>Observability is provided by self-hosted <b>Prometheus + Grafana</b> on a public monitoring EC2; metrics come from the app and from <code>node_exporter</code> via EC2 service discovery. The app fleet is fully private — no ALB, no NAT — reachable only through SSM and VPC endpoints.</p>
+
+<!-- 1 -->
+<h2>1 · Healthy baseline <span class="pill ok">state: OK</span></h2>
+<p>At rest, the ingestion API serves traffic normally. The Golden Signals dashboard is green and the error-rate alarm sits in <b>OK</b>.</p>
+<figure>
+  <img src="screenshot/GrafanaDashboardOkState.png" alt="Grafana Golden Signals dashboard in healthy state">
+  <figcaption><b>Grafana — Golden Signals (healthy).</b> Latency, traffic, error rate, CPU and memory all nominal. Error rate well below the 5% threshold.</figcaption>
+</figure>
+<figure>
+  <img src="screenshot/OKErrorRate.png" alt="CloudWatch ErrorRate alarm in OK state">
+  <figcaption><b>CloudWatch — <code>TechStream-prod-ErrorRate-High</code> in OK.</b> The alarm watches the <code>5xx_error_rate</code> metric the app publishes every 60&nbsp;seconds.</figcaption>
+</figure>
+
+<!-- 2 -->
+<h2>2 · Inject a fault <span class="pill bad">chaos: http_500</span></h2>
+<p>A chaos script is run <i>on an app instance via SSM</i> (the fleet is private, so there's no public endpoint to hit). It floods <code>localhost:8000/api/v1/ingest</code> with malformed requests, each returning HTTP 500, driving the error rate past the alarm threshold.</p>
+<figure>
+  <img src="screenshot/GrafanaDashboardHighErrorRate.png" alt="Grafana dashboard showing error rate spiking">
+  <figcaption><b>Grafana — error rate spikes.</b> Within ~60&nbsp;seconds the Error Rate panel crosses into the red and traffic jumps as the chaos load lands.</figcaption>
+</figure>
+<figure>
+  <img src="screenshot/AlarmErrorRate.png" alt="CloudWatch ErrorRate alarm in ALARM state">
+  <figcaption><b>CloudWatch — alarm fires (<span style="color:var(--bad)">ALARM</span>).</b> Two consecutive periods above 5% flip the alarm, which is the trigger for automated remediation.</figcaption>
+</figure>
+
+<!-- 3 -->
+<h2>3 · Automatic remediation <span class="pill warn">EventBridge → Lambda</span></h2>
+<p>The alarm state-change is routed by an <b>EventBridge</b> rule (filtered to <code>state = ALARM</code>) straight to the <b>Remediator Lambda</b> — the single, deterministic trigger. The Lambda inspects the ASG and chooses an action: if instances are missing it <b>scales out</b>; otherwise it <b>restarts the <code>techstream</code> service</b> over SSM and polls the command result to confirm success.</p>
+<figure>
+  <img src="screenshot/RemediationEvent.png" alt="Remediation event log entry">
+  <figcaption><b>Audit trail — <code>/techstream/remediation-events</code>.</b> The Lambda records each action as structured JSON: the alarm name, <code>action_taken</code> (here a service restart), the result, and how long it took. This is the proof the system healed itself.</figcaption>
+</figure>
+
+<!-- 4 -->
+<h2>4 · Recovery <span class="pill ok">state: OK</span></h2>
+<p>Once the service restarts and the malformed traffic stops, the 5xx rate falls back to baseline and CloudWatch returns the alarm to <b>OK</b> — the dashboard goes green again. End to end, detection through recovery is a few minutes with no human involvement.</p>
+<figure>
+  <img src="screenshot/OKErrorRate.png" alt="CloudWatch ErrorRate alarm back in OK state">
+  <figcaption><b>CloudWatch — alarm clears.</b> The error-rate alarm transitions back to OK after the remediation takes effect, closing the loop.</figcaption>
+</figure>
+
+<!-- 5 -->
+<h2>5 · AI root-cause analysis <span class="pill">DevOps Guru → Bedrock</span></h2>
+<p>Independently of the fast remediation path, <b>Amazon DevOps Guru</b> analyses the anomaly and publishes an insight to a dedicated <code>-insights</code> SNS topic. The <b>RCA Summariser Lambda</b> turns that insight into a readable root-cause email — using <b>Amazon Bedrock (Claude)</b> when available, and falling back to a structured summary of the raw insight when the account's policy blocks Bedrock.</p>
+<figure>
+  <img src="screenshot/AIDevopsGuruInsights.png" alt="DevOps Guru insight / AI RCA">
+  <figcaption><b>DevOps Guru insight.</b> The insight (severity, affected resources, anomaly window) is the input to the RCA email. The pipeline always emails the on-call/incidents teams; a <code>bedrock_available</code> metric records whether the AI narrative or the fallback was used, so the degraded path is observable.</figcaption>
+</figure>
+<div class="note"><b>Graceful degradation:</b> on this sandbox account a Service Control Policy blocks <code>bedrock:InvokeModel</code>. The Lambda detects the denial, sends the fallback RCA email instead, and emits <code>bedrock_available = 0</code> — so the incident report always arrives, with or without the AI summary.</div>
+
+<h2>What the walkthrough proves</h2>
+<table>
+  <tr><th>Stage</th><th>Screenshot</th><th>What it demonstrates</th></tr>
+  <tr><td>Baseline</td><td>Grafana OK · ErrorRate OK</td><td>Live observability; healthy steady state</td></tr>
+  <tr><td>Fault</td><td>Grafana high error rate · Alarm ALARM</td><td>Detection — custom metric &amp; alarm react to a real injected failure</td></tr>
+  <tr><td>Remediation</td><td>Remediation event log</td><td>Automated, audited self-healing via EventBridge + Lambda + SSM</td></tr>
+  <tr><td>Recovery</td><td>ErrorRate back to OK</td><td>Closed loop — system returns to health unattended</td></tr>
+  <tr><td>RCA</td><td>DevOps Guru insight</td><td>AI-assisted incident analysis with a resilient fallback</td></tr>
+</table>
+
+<div class="grid">
+  <div class="card">
+    <h3>Security by design</h3>
+    <p>Private app fleet (no public IP, no SSH, no NAT); SSM-only administration; IMDSv2 enforced; least-privilege IAM; all AWS access via VPC endpoints; Grafana restricted to allow-listed IPs.</p>
+  </div>
+  <div class="card">
+    <h3>Engineered for operations</h3>
+    <p>Everything is Terraform; a pytest suite and a GitHub Actions CI pipeline (fmt/validate + tests + tfsec) back the code; a chaos harness proves the healing on demand.</p>
+  </div>
+</div>
+
+<footer>
+  TechStream Self-Healing System · screenshots captured from the live eu-west-1 deployment ·
+  see <code>docs/PROJECT_BRIEF.md</code> and <code>docs/techstream-architecture.drawio</code> for the full design.
+</footer>
+
+</div>
+</body>
+</html>
