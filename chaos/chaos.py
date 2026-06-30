@@ -102,26 +102,34 @@ def scenario_cpu_spike(region, duration=120):
         }
     })
 
+    # Oversubscribe: 2x workers per vCPU so every core saturates to 100% almost
+    # immediately and stays pinned, rather than ramping up gradually.
+    n_cpu = multiprocessing.cpu_count() or 2
+    workers = n_cpu * 2
+
     try:
         subprocess.check_call(['which', 'stress-ng'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        proc = subprocess.Popen(['stress-ng', '--cpu', '4', '--timeout', f'{duration}s'])
+        proc = subprocess.Popen(['stress-ng', '--cpu', str(workers), '--timeout', f'{duration}s'])
         start = time.time()
         while time.time() - start < duration:
-            cpu = psutil.cpu_percent(interval=5)
+            cpu = psutil.cpu_percent(interval=2)
             print(f'[cpu_spike] elapsed={int(time.time()-start)}s  cpu={cpu}%')
         proc.wait()
     except Exception:
-        def busy_loop(sec):
-            end = time.time() + sec
-            while time.time() < end:
-                sum(i * i for i in range(100000))
+        def busy_loop(deadline):
+            # Tight integer spin — no allocation, no I/O — pins one core to 100%.
+            x = 0
+            while time.time() < deadline:
+                for _ in range(2_000_000):
+                    x = x * 3 + 1
+            return x
 
-        cpu_count = multiprocessing.cpu_count()
-        with concurrent.futures.ProcessPoolExecutor(max_workers=cpu_count) as executor:
-            futs = [executor.submit(busy_loop, duration) for _ in range(cpu_count)]
+        deadline = time.time() + duration
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+            futs = [executor.submit(busy_loop, deadline) for _ in range(workers)]
             start = time.time()
             while time.time() - start < duration:
-                cpu = psutil.cpu_percent(interval=5)
+                cpu = psutil.cpu_percent(interval=2)
                 print(f'[cpu_spike] elapsed={int(time.time()-start)}s  cpu={cpu}%')
             concurrent.futures.wait(futs)
 
