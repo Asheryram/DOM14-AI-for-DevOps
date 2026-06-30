@@ -668,10 +668,24 @@ Instead, you stage `chaos.py` onto an InService app instance and run it there ov
 targeting `localhost:8000`. (For a fully automated version of this, skip to Task 12 —
 `verify_healing.sh` does all of this for you.)
 
-### 8a — Pick a target instance
+> **⚠️ Two things that bite people here:**
+>
+> 1. **Windows / Git Bash:** run `export MSYS_NO_PATHCONV=1` **in every terminal** you
+>    open for this lab. Without it, Git Bash rewrites leading-slash arguments (log groups
+>    like `/techstream/...` and `/tmp/chaos.py`) into Windows paths and the AWS CLI
+>    rejects them with a validation error. (Harmless on macOS/Linux.)
+> 2. **Shell variables don't cross terminals.** `$INSTANCE_ID` and `$CHAOS_B64` only exist
+>    in the terminal that set them. Set them in the **same** terminal where you run the
+>    `send-command` calls (Terminal 3 below).
+>
+> ```bash
+> export MSYS_NO_PATHCONV=1   # Windows/Git Bash only — no effect elsewhere
+> ```
 
-Reuse the `$INSTANCE_ID` you captured in Task 6.1 (any InService instance works), or
-discover one now:
+### 8a — Pick a target instance (and confirm SSM)
+
+Discover an InService instance and store it in `$INSTANCE_ID` **in the terminal you will
+run chaos from** (Terminal 3):
 
 ```bash
 INSTANCE_ID=$(aws autoscaling describe-auto-scaling-groups \
@@ -680,8 +694,27 @@ INSTANCE_ID=$(aws autoscaling describe-auto-scaling-groups \
   --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`]|[0].InstanceId' \
   --output text)
 
-echo "Target instance: $INSTANCE_ID"
+echo "INSTANCE_ID=$INSTANCE_ID"
 ```
+
+`echo` must print an `i-…` value. If it shows `INSTANCE_ID=` (blank) or `None`, the fleet
+has no running instances yet — re-check the ASG (Task 6.1) and wait for any in-progress
+instance refresh to finish before continuing.
+
+Confirm the instance is registered with SSM — chaos injection and remediation both depend
+on it:
+
+```bash
+aws ssm describe-instance-information \
+  --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+  --region eu-west-1 \
+  --query "InstanceInformationList[0].PingStatus" \
+  --output text
+```
+
+**Expected:** `Online`. If it prints `None`, wait 2–3 minutes for the SSM agent to register
+and retry. (The instance must be running the **standard** Amazon Linux 2023 AMI — the
+`minimal` AMI has no SSM agent and never registers.)
 
 ### 8b — Open monitoring terminals
 
@@ -710,11 +743,15 @@ done
 
 **Terminal 3 — stage chaos.py onto the instance, then run http_500 over SSM:**
 
+> This is the terminal that must have `$INSTANCE_ID` set (from 8a) and, on Windows,
+> `export MSYS_NO_PATHCONV=1`. Run all of the following **from the repo root**.
+
 First ship the script to the instance (the fleet has no internet, so we base64-encode
 and decode it through SSM):
 
 ```bash
 CHAOS_B64=$(base64 -w0 chaos/chaos.py 2>/dev/null || base64 chaos/chaos.py | tr -d '\n')
+echo "chaos.py bytes: ${#CHAOS_B64}"   # must be non-zero (a few thousand)
 
 aws ssm send-command \
   --instance-ids "$INSTANCE_ID" \
@@ -723,6 +760,10 @@ aws ssm send-command \
   --region eu-west-1 \
   --query 'Command.CommandId' --output text
 ```
+
+> If you get `ValidationException: Value '[]' at 'instanceIds'`, then `$INSTANCE_ID` is
+> empty in this terminal — re-run the 8a discovery command here first. If `chaos.py bytes`
+> is `0`, you are not in the repo root — `cd` to it so `chaos/chaos.py` resolves.
 
 Then run the http_500 scenario on the instance, targeting the local Flask app:
 
@@ -910,6 +951,9 @@ aws logs tail /aws/lambda/TechStream-prod-RCASummariser \
 Repeat the process with the CPU spike scenario to see the CPU alarm fire instead
 of the error rate alarm.
 
+> Same shell rules as Task 8: on Windows run `export MSYS_NO_PATHCONV=1` in each terminal,
+> and make sure `$INSTANCE_ID` is set in Terminal 3 (re-run the 8a discovery if needed).
+
 **Terminal 1** — stream remediation log (already running, or restart it):
 ```bash
 aws logs tail /techstream/remediation-events --follow --region eu-west-1
@@ -1069,6 +1113,20 @@ Takes about 5 minutes.
 ---
 
 ## Troubleshooting
+
+### Windows / Git Bash command errors
+
+These are the three most common errors when running the AWS CLI commands from Git Bash:
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `InvalidParameterException ... 'logGroupName' failed to satisfy ... pattern` (or a mangled path containing `C:/...`) | Git Bash rewrote a leading-slash argument (e.g. `/techstream/...`, `/tmp/chaos.py`) into a Windows path | `export MSYS_NO_PATHCONV=1` in that terminal, then re-run. Set it in **every** terminal. |
+| `ValidationException: Value '[]' at 'instanceIds'` | `$INSTANCE_ID` is empty — it was set in a different terminal | Re-run the Task 8a discovery in the current terminal; `echo "$INSTANCE_ID"` must show `i-…` |
+| `chaos.py bytes: 0` / staged file is empty | Not in the repo root, so `chaos/chaos.py` did not resolve | `cd` to the repository root before building `$CHAOS_B64` |
+
+`ResourceNotFoundException: The specified log group does not exist` on `aws logs tail` is
+different — it means `terraform apply` has not finished creating that log group yet (or the
+Lambda has not run). Confirm with `aws logs describe-log-groups --log-group-name-prefix /techstream --region eu-west-1`.
 
 ### Monitoring EC2 services not starting
 
