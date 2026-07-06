@@ -13,6 +13,7 @@ SES_FROM = os.environ.get('SES_FROM', 'devops-guru@techstream.io')
 SES_TO   = os.environ.get('SES_TO',   'incidents@techstream.io')
 # Name of the systemd unit the app runs under (see compute/user_data.sh.tpl).
 APP_SERVICE = os.environ.get('APP_SERVICE', 'techstream')
+DIAG_LOG_GROUP = '/techstream/diagnostics'
 
 asg = boto3.client('autoscaling')
 ssm = boto3.client('ssm')
@@ -102,6 +103,46 @@ def _restart_app(instance_ids):
     logger.info('Restarted %s on %d instances', APP_SERVICE, len(instance_ids))
 
 
+def _capture_diagnostics(instance_ids, stream):
+    """Snapshot logs/CPU/memory/disk from the instances BEFORE restarting, so the
+    evidence survives the bounce. Best-effort — never raises, never blocks the fix."""
+    cmd = (
+        'echo "== journalctl techstream (last 30) =="; '
+        'journalctl -u techstream --no-pager -n 30 2>&1 || true; '
+        'echo "== top =="; top -bn1 | head -12; '
+        'echo "== free -m =="; free -m; '
+        'echo "== disk =="; df -h /'
+    )
+    try:
+        resp = ssm.send_command(
+            InstanceIds=instance_ids,
+            DocumentName='AWS-RunShellScript',
+            Parameters={'commands': [cmd]},
+        )
+        command_id = resp['Command']['CommandId']
+    except Exception:
+        logger.warning('diagnostics capture dispatch failed', exc_info=True)
+        return []
+
+    captured = []
+    for iid in instance_ids:
+        for _ in range(10):  # up to ~20s
+            time.sleep(2)
+            try:
+                inv = ssm.get_command_invocation(CommandId=command_id, InstanceId=iid)
+            except ssm.exceptions.InvocationDoesNotExist:
+                continue
+            if inv['Status'] in ('Success', 'Failed', 'Cancelled', 'TimedOut'):
+                snapshot = (inv.get('StandardOutputContent') or '')[:6000]
+                try:
+                    _write_log(DIAG_LOG_GROUP, stream, {'instance_id': iid, 'diagnostics': snapshot})
+                    captured.append(iid)
+                except Exception:
+                    logger.warning('failed to persist diagnostics for %s', iid, exc_info=True)
+                break
+    return captured
+
+
 def handler(event, context):
     alarm_name, state = _parse_event(event)
 
@@ -115,6 +156,7 @@ def handler(event, context):
     start = time.time()
     action = 'none'
     result = 'success'
+    diagnostics_captured = []
 
     try:
         ag = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[ASG_NAME])
@@ -142,6 +184,8 @@ def handler(event, context):
             instance_ids = [i['InstanceId'] for i in instances_before]
             if instance_ids:
                 action = 'service_restart'
+                # Grab evidence before we bounce the process (error-rate / memory case).
+                diagnostics_captured = _capture_diagnostics(instance_ids, f'diag-{int(time.time())}')
                 _restart_app(instance_ids)
             else:
                 logger.warning('No InService instances and desired=%d - no action taken', desired)
@@ -158,7 +202,9 @@ def handler(event, context):
         'alarm_name': alarm_name,
         'action_taken': action,
         'result': result,
-        'duration_ms': int((time.time() - start) * 1000)
+        'duration_ms': int((time.time() - start) * 1000),
+        'diagnostics_captured': diagnostics_captured,
+        'diagnostics_log': DIAG_LOG_GROUP if diagnostics_captured else None
     }
     _write_log('/techstream/remediation-events', f'remediation-{int(time.time())}', log_entry)
 

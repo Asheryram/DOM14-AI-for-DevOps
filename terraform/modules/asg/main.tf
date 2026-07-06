@@ -43,3 +43,21 @@ resource "aws_autoscaling_group" "this" {
     create_before_destroy = true
   }
 }
+
+# CPU saturation is handled here — declaratively — not by the remediator Lambda.
+# Target tracking keeps the fleet's average CPU near the target, scaling OUT under
+# load and back IN when it subsides (between min_size and max_size). This is what
+# auto-scaling is for; the Lambda is reserved for what scaling can't do (restart a
+# wedged/leaking service on the ErrorRate/Memory alarms).
+resource "aws_autoscaling_policy" "cpu_target" {
+  name                   = "${var.name}-cpu-target-tracking"
+  autoscaling_group_name = aws_autoscaling_group.this.name
+  policy_type            = "TargetTrackingScaling"
+
+  target_tracking_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ASGAverageCPUUtilization"
+    }
+    target_value = var.cpu_target_value
+  }
+}

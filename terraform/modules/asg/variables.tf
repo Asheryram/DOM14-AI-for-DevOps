@@ -41,3 +41,9 @@ variable "health_check_grace_period" {
   type        = number
   default     = 120
 }
+
+variable "cpu_target_value" {
+  description = "Target average CPU percent for the ASG target-tracking scaling policy (scales out/in to hold this)"
+  type        = number
+  default     = 75
+}

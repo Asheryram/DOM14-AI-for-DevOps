@@ -22,7 +22,7 @@ app fleet is fully private and reaches AWS only through VPC endpoints.
 | `modules/compute` | Private S3 bucket for pre-staged artifacts; a `null_resource` that stages Python wheels and the `node_exporter` binary to S3; app security group (port 8000); IAM instance profile (SSM + CloudWatch + S3 read); EC2 launch template with AL2023 user-data. |
 | `modules/asg` | Auto Scaling Group (min 2 / max 10, desired 2) wired to the launch template and the **private** subnets, with an instance refresh on launch-template change. |
 | `modules/alarms` | **Two** SNS topics (`-alerts` and `-insights`) and 3 CloudWatch alarms (Error Rate > 5 %, CPU > 85 %, Memory > 90 %), all dimensioned by `AutoScalingGroupName`. |
-| `modules/lambda` | Remediator Lambda, RCA Summariser Lambda, EventBridge rule → Remediator, the RCA Lambda's subscription to the insights topic, and 4 CloudWatch log groups. |
+| `modules/lambda` | Remediator Lambda, RCA Summariser Lambda, EventBridge rule → Remediator (ErrorRate/Memory only), the RCA Lambda's subscription to the insights topic, and 5 CloudWatch log groups (incl. `/techstream/diagnostics`). |
 | `modules/devops_guru` | Amazon DevOps Guru resource collection (CloudFormation stack) with the insights topic as its notification channel. |
 | `modules/monitoring` | Public-subnet EC2 (t3.small) with an Elastic IP, security group, and an EC2-service-discovery IAM role; AL2023 user-data installs Prometheus (binary) and Grafana (RPM). |
 
@@ -79,18 +79,26 @@ Error Count by Status, and Memory Usage %.
 ### 3 — Self-healing remediation
 
 ```
-CW Alarm (state → ALARM)
+CPU-High (saturation) ──► ASG Target-Tracking Policy ──► scale OUT, then back IN   [native auto-scaling]
+
+ErrorRate-High / Memory-High (state → ALARM)
   ├── EventBridge Rule (filters state=ALARM) ──► Remediator Lambda
-  │        if InService < desired  ──► ASG SetDesiredCapacity (+2)   [scale out]
-  │        else                     ──► SSM SendCommand: restart `techstream`,
+  │        if InService < desired  ──► ASG SetDesiredCapacity (+2)   [replace lost capacity]
+  │        else                     ──► capture diagnostics → SSM restart `techstream`,
   │                                       poll the invocation for real success/failure
   └── SNS `-alerts` topic ──► on-call + incidents email (alarm AND OK notifications)
 ```
 
-EventBridge is the **single** remediation trigger: its event pattern filters to `state=ALARM`
-and the three alarm names, so the remediator fires exactly once per alarm and never on
+**Capacity vs. service recovery are split by design.** CPU saturation is *capacity* pressure,
+so it's handled declaratively by the **ASG target-tracking scaling policy** (scale out under
+load, scale back in when it subsides) — not by a Lambda, since restarting a process doesn't
+relieve real load. The **Remediator Lambda** is reserved for what scaling *can't* do: on
+`ErrorRate-High` (wedged process) or `Memory-High` (leak) it **captures diagnostics**
+(`journalctl`/`top`/`free`/`df` → `/techstream/diagnostics`) and then **restarts the service**.
+EventBridge is the **single** trigger for the Lambda: its pattern filters to `state=ALARM` and
+only the ErrorRate/Memory alarm names, so it fires exactly once per alarm and never on
 OK/INSUFFICIENT_DATA. The remediator is **not** subscribed to SNS, which avoids double-firing
-and avoids acting on recovery notifications. (The handler still defensively ignores any
+and acting on recovery notifications. (The handler still defensively ignores any
 non-ALARM event it receives.) Each run writes an audit entry to the
 `/techstream/remediation-events` log group.
 
@@ -167,6 +175,6 @@ chaos/
   chaos.py                         ← fault-injection scenarios (run on an instance via SSM)
   verify_healing.sh                ← SSM-driven inject → heal verification
 tests/
-  test_app.py / test_remediator.py / test_rca_summariser.py  ← pytest suite (16 tests)
+  test_app.py / test_remediator.py / test_rca_summariser.py  ← pytest suite (17 tests)
 .github/workflows/ci.yml           ← pytest + terraform fmt/validate + tfsec
 ```

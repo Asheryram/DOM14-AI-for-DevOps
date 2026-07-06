@@ -82,7 +82,7 @@
                 <mxCell id="lbl_alerting" value="Alerting" style="text;html=1;align=center;fontStyle=1;fontSize=11;fontColor=#DD344C;strokeColor=#DD344C;fillColor=#FFF5F5;rounded=1;" parent="1" vertex="1">
                     <mxGeometry x="1710" y="300" width="100" height="28" as="geometry"/>
                 </mxCell>
-                <mxCell id="eventbridge" value="EventBridge Rule&#xa;state = ALARM" style="outlineConnect=0;fontColor=#232F3E;gradientColor=none;strokeColor=none;fillColor=#E7157B;labelBackgroundColor=#ffffff;align=center;html=1;fontSize=9;fontStyle=1;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.eventbridge;" parent="1" vertex="1">
+                <mxCell id="eventbridge" value="EventBridge Rule&#xa;state = ALARM&#xa;(ErrorRate / Memory only)" style="outlineConnect=0;fontColor=#232F3E;gradientColor=none;strokeColor=none;fillColor=#E7157B;labelBackgroundColor=#ffffff;align=center;html=1;fontSize=9;fontStyle=1;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.eventbridge;" parent="1" vertex="1">
                     <mxGeometry x="1720" y="350" width="60" height="60" as="geometry"/>
                 </mxCell>
                 <mxCell id="sns_alerts" value="SNS&#xa;-alerts topic" style="outlineConnect=0;fontColor=#232F3E;gradientColor=none;strokeColor=none;fillColor=#E7157B;labelBackgroundColor=#ffffff;align=center;html=1;fontSize=9;fontStyle=1;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.simple_notification_service;" parent="1" vertex="1">
@@ -100,7 +100,7 @@
                 <mxCell id="ssm_cmd" value="SSM&#xa;Run Command" style="outlineConnect=0;fontColor=#232F3E;gradientColor=none;strokeColor=none;fillColor=#E7157B;labelBackgroundColor=#ffffff;align=center;html=1;fontSize=10;fontStyle=1;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.systems_manager;" parent="1" vertex="1">
                     <mxGeometry x="1920" y="540" width="60" height="60" as="geometry"/>
                 </mxCell>
-                <mxCell id="restart_label" value="systemctl restart techstream&#xa;(or ASG scale-out +2)" style="text;html=1;align=center;fontSize=9;fontColor=#666666;fontStyle=2;" parent="1" vertex="1">
+                <mxCell id="restart_label" value="1) capture diagnostics&#xa;2) systemctl restart techstream" style="text;html=1;align=center;fontSize=9;fontColor=#666666;fontStyle=2;" parent="1" vertex="1">
                     <mxGeometry x="1890" y="610" width="160" height="26" as="geometry"/>
                 </mxCell>
                 <mxCell id="lbl_ai" value="AI / RCA" style="text;html=1;align=center;fontStyle=1;fontSize=11;fontColor=#01A88D;strokeColor=#01A88D;fillColor=#E6FAF7;rounded=1;" parent="1" vertex="1">
@@ -147,7 +147,7 @@
                 <mxCell id="e11" value="evaluates" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#E7157B;strokeWidth=2;fontColor=#E7157B;fontSize=9;" parent="1" source="cloudwatch" target="cw_alarm" edge="1">
                     <mxGeometry relative="1" as="geometry"/>
                 </mxCell>
-                <mxCell id="e12" value="state = ALARM" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#DD344C;strokeWidth=3;fontColor=#DD344C;fontStyle=1;fontSize=9;" parent="1" source="cw_alarm" target="eventbridge" edge="1">
+                <mxCell id="e12" value="ErrorRate / Memory = ALARM" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#DD344C;strokeWidth=3;fontColor=#DD344C;fontStyle=1;fontSize=9;" parent="1" source="cw_alarm" target="eventbridge" edge="1">
                     <mxGeometry relative="1" as="geometry"/>
                 </mxCell>
                 <mxCell id="e13" value="alarm + OK action" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#E7157B;strokeWidth=1;dashed=1;fontColor=#E7157B;fontSize=9;" parent="1" source="cw_alarm" target="sns_alerts" edge="1">
@@ -168,7 +168,7 @@
                         </Array>
                     </mxGeometry>
                 </mxCell>
-                <mxCell id="e17" value="SetDesiredCapacity (scale-out +2)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#ED7100;strokeWidth=2;dashed=0;fontColor=#ED7100;fontSize=9;" parent="1" source="lambda_rem" target="asg_group" edge="1">
+                <mxCell id="e17" value="SetDesiredCapacity — only if instances lost" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#ED7100;strokeWidth=1;dashed=1;fontColor=#ED7100;fontSize=9;" parent="1" source="lambda_rem" target="asg_group" edge="1">
                     <mxGeometry relative="1" as="geometry">
                         <Array as="points">
                             <mxPoint x="2010" y="450"/>
@@ -269,6 +269,26 @@
                 </mxCell>
                 <mxCell id="leg6l" value="Chaos injection (via SSM)" style="text;html=1;align=left;fontSize=9;" parent="1" vertex="1">
                     <mxGeometry x="140" y="1168" width="120" height="16" as="geometry"/>
+                </mxCell>
+                <mxCell id="scaling_policy" value="ASG Target-Tracking Policy&#xa;CPU 75% — scale out / in&#xa;(native, no Lambda)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FEF0E3;strokeColor=#ED7100;fontSize=10;fontStyle=1;fontColor=#ED7100;" parent="1" vertex="1">
+                    <mxGeometry x="1680" y="238" width="185" height="58" as="geometry"/>
+                </mxCell>
+                <mxCell id="diagnostics" value="CloudWatch Logs&#xa;/techstream/diagnostics&#xa;(pre-restart snapshot)" style="outlineConnect=0;fontColor=#232F3E;gradientColor=none;strokeColor=none;fillColor=#E7157B;labelBackgroundColor=#ffffff;align=center;html=1;fontSize=9;fontStyle=1;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.cloudwatch;" parent="1" vertex="1">
+                    <mxGeometry x="2150" y="350" width="60" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_sp1" value="CPU average metric" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#ED7100;strokeWidth=2;fontColor=#ED7100;fontSize=9;" parent="1" source="cloudwatch" target="scaling_policy" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_sp2" value="scale out / in (native auto-scaling)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#ED7100;strokeWidth=2;fontColor=#ED7100;fontStyle=1;fontSize=9;" parent="1" source="scaling_policy" target="asg_group" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="1770" y="135"/>
+                            <mxPoint x="600" y="135"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e_diag" value="capture before restart" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#E7157B;strokeWidth=1;dashed=1;fontColor=#E7157B;fontSize=9;" parent="1" source="lambda_rem" target="diagnostics" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
                 </mxCell>
             </root>
         </mxGraphModel>

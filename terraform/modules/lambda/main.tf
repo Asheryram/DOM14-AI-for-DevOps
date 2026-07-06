@@ -111,6 +111,13 @@ resource "aws_lambda_function" "remediator" {
 # the remediator fires exactly once per ALARM and never on OK/INSUFFICIENT_DATA.
 # (No SNS subscription on the remediator — that would double-invoke on ALARM and
 # wrongly remediate on the OK recovery notification.)
+#
+# Only the alarms the Lambda can meaningfully act on are routed here:
+#   - ErrorRate-High → restart the wedged service
+#   - Memory-High    → capture diagnostics + restart to reclaim a leak
+# CPU-High is intentionally NOT routed: CPU saturation is handled declaratively
+# by the ASG target-tracking scaling policy (add capacity), which auto-scales
+# back in too — something a Lambda restart can't do.
 
 resource "aws_cloudwatch_event_rule" "alarm_to_remediation" {
   name        = "${var.name_prefix}-AlarmToRemediation"
@@ -123,7 +130,6 @@ resource "aws_cloudwatch_event_rule" "alarm_to_remediation" {
       state = { value = ["ALARM"] }
       alarmName = [
         "${var.name_prefix}-ErrorRate-High",
-        "${var.name_prefix}-CPU-High",
         "${var.name_prefix}-Memory-High"
       ]
     }
@@ -201,5 +207,12 @@ resource "aws_cloudwatch_log_group" "remediation_events" {
 
 resource "aws_cloudwatch_log_group" "chaos_events" {
   name              = "/techstream/chaos-events"
+  retention_in_days = 14
+}
+
+# Pre-restart diagnostic snapshots (journalctl/top/free/df) captured by the
+# remediator before it bounces a service, so the evidence survives the restart.
+resource "aws_cloudwatch_log_group" "diagnostics" {
+  name              = "/techstream/diagnostics"
   retention_in_days = 14
 }

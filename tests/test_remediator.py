@@ -66,3 +66,18 @@ def test_restart_failure_is_reported(remediator, monkeypatch):
     result = remediator.handler(event, None)
     # A failed remote command must surface as failure, not silent success.
     assert json.loads(result["body"])["result"] == "failure"
+
+
+def test_diagnostics_captured_before_restart(remediator, monkeypatch):
+    # Memory-High → restart, and evidence must be snapshotted first.
+    monkeypatch.setattr(remediator.time, "sleep", lambda *a, **k: None)
+    remediator.asg.describe_auto_scaling_groups.return_value = _asg_response(2, 2)
+    remediator.ssm.send_command.return_value = {"Command": {"CommandId": "cmd-1"}}
+    remediator.ssm.get_command_invocation.return_value = {"Status": "Success", "StandardOutputContent": "== top =="}
+    event = {"detail": {"alarmName": "TechStream-prod-Memory-High", "state": {"value": "ALARM"}}}
+    result = remediator.handler(event, None)
+    assert json.loads(result["body"])["action"] == "service_restart"
+    sent_cmds = [c.kwargs["Parameters"]["commands"][0] for c in remediator.ssm.send_command.call_args_list]
+    # A diagnostics snapshot (journalctl) must be taken, and the restart must run.
+    assert any("journalctl" in c for c in sent_cmds)
+    assert any("systemctl restart techstream" in c for c in sent_cmds)

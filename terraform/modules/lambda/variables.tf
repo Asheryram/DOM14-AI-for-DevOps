@@ -60,9 +60,9 @@ variable "aws_region" {
 }
 
 variable "lambda_timeout" {
-  description = "Lambda function timeout in seconds"
+  description = "Lambda function timeout in seconds (allows diagnostics capture + SSM restart poll + SES)"
   type        = number
-  default     = 60
+  default     = 120
 }
 
 variable "lambda_memory" {

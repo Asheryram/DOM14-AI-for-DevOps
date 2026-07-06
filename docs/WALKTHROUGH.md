@@ -946,56 +946,58 @@ aws logs tail /aws/lambda/TechStream-prod-RCASummariser \
 
 ---
 
-## Task 11 — Run a Second Scenario (CPU Spike)
+## Task 11 — Run a Second Scenario (CPU Spike → native auto-scaling)
 
-Repeat the process with the CPU spike scenario to see the CPU alarm fire instead
-of the error rate alarm.
+The CPU path is deliberately handled **differently** from the error-rate path.
+CPU saturation is *capacity* pressure, so it's resolved by the **ASG target-tracking
+scaling policy** (add instances, and remove them again when load drops) — **not** by
+the remediator Lambda. Restarting a service doesn't relieve real CPU load; adding
+capacity does. So on a CPU spike you watch the **fleet scale out**, not a remediation event.
 
 > Same shell rules as Task 8: on Windows run `export MSYS_NO_PATHCONV=1` in each terminal,
-> and make sure `$INSTANCE_ID` is set in Terminal 3 (re-run the 8a discovery if needed).
+> and make sure `$INSTANCE_ID` is set (re-run the 8a discovery if needed).
 
-**Terminal 1** — stream remediation log (already running, or restart it):
-```bash
-aws logs tail /techstream/remediation-events --follow --region eu-west-1
-```
-
-**Terminal 2** — watch the CPU alarm:
+**Terminal 1** — watch the ASG capacity (desired + InService):
 ```bash
 while true; do
   echo -n "$(date -u +%H:%M:%S)  "
-  aws cloudwatch describe-alarms \
-    --alarm-name-prefix TechStream-prod-CPU \
-    --region eu-west-1 \
-    --query 'MetricAlarms[0].StateValue' \
+  aws autoscaling describe-auto-scaling-groups \
+    --auto-scaling-group-names TechStream-prod-ASG --region eu-west-1 \
+    --query 'AutoScalingGroups[0].{Desired:DesiredCapacity,InService:length(Instances[?LifecycleState==`InService`])}' \
     --output text
-  sleep 15
+  sleep 20
 done
 ```
 
-**Terminal 3** — run the `cpu_spike` scenario on the instance via SSM. `chaos.py` is
-already staged at `/tmp/chaos.py` from Task 8 (re-stage it with the Task 8b base64 step
-if you picked a different instance):
-
+**Terminal 2** — enable 1-minute metrics (target tracking needs them to react fast), then peg CPU hard:
 ```bash
-aws ssm send-command \
-  --instance-ids "$INSTANCE_ID" \
-  --document-name AWS-RunShellScript \
-  --parameters '{"commands":["python3.11 /tmp/chaos.py --scenario cpu_spike --region eu-west-1 --duration 180"]}' \
-  --region eu-west-1 \
-  --query 'Command.CommandId' \
-  --output text
+# 1-minute CPU metrics on the running instance (only needed once)
+aws ec2 monitor-instances --instance-ids "$INSTANCE_ID" --region eu-west-1
+
+# fastest, hardest peg: native 'yes' loops, one per vCPU x2, for 7 minutes
+aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
+  --parameters '{"commands":["N=$(( $(nproc) * 2 )); for i in $(seq $N); do timeout 420 yes > /dev/null & done; wait"]}' \
+  --region eu-west-1 --query 'Command.CommandId' --output text
 ```
 
-The `cpu_spike` scenario pegs all CPUs on the instance (using `stress-ng` if present,
-otherwise multiprocessing busy loops). Watch Terminal 2. The CPU alarm fires after
-2 consecutive minutes above 85 %. The Remediator Lambda will again be invoked via
-EventBridge, this time with
-`alarm_name = TechStream-prod-CPU-High`.
+Watch Terminal 1: as average CPU crosses the policy target (75 %), the **`Desired`
+count climbs** and new instances come `InService`; once the `yes` load ends and CPU
+falls, the policy **scales back in** to `min_size`. You can see the policy's decisions with:
+```bash
+aws autoscaling describe-scaling-activities --auto-scaling-group-name TechStream-prod-ASG \
+  --region eu-west-1 --max-items 4 --query 'Activities[].{Status:StatusCode,Desc:Description,Cause:Cause}'
+```
 
-> **Memory scenario:** the third scenario runs the same way — swap `--scenario cpu_spike`
-> for `--scenario memory_leak` and watch `TechStream-prod-Memory-High` instead. The
-> `memory_leak` scenario allocates 10 MB chunks until it crosses ~90 % memory (which the
-> Flask app reports via the `mem_used_percent` CloudWatch metric).
+> **Timing:** with `desired = 1` you're pegging the only instance, so its CPU *is* the ASG
+> average. With 2+ instances the alarm/policy works on the **average**, so peg all of them.
+> Target tracking reacts in ~3 minutes once 1-minute metrics are flowing.
+
+> **Memory scenario (this one *does* use the Lambda):** `--scenario memory_leak` crosses
+> ~90 % memory → the `Memory-High` alarm → EventBridge → the **Remediator Lambda**, which
+> **captures diagnostics** (journalctl/top/free/df → `/techstream/diagnostics`) and then
+> **restarts `techstream`** to reclaim the leak — the audit entry appears in
+> `/techstream/remediation-events`. Memory leaks aren't fixed by adding capacity, so this
+> is the Lambda's job, not the scaling policy's.
 
 ---
 
@@ -1293,7 +1295,7 @@ aws logs tail /aws/lambda/TechStream-prod-RCASummariser \
 [x] Task 9   — Alarm fired (ALARM state observed); Lambda audit log appeared in Terminal 1
 [x] Task 9   — Alarm returned to OK; Grafana Error Rate panel green again
 [x] Task 10  — RCA email received (Bedrock summary, or raw-insight fallback with yellow banner)
-[x] Task 11  — CPU spike (and optionally memory_leak) scenario run via SSM; alarm fired and healed
+[x] Task 11  — CPU spike → ASG target-tracking scaled out then back in; memory_leak → Lambda captured diagnostics + restarted
 [x] Task 12  — verify_healing.sh completed with PASS
 [x] Task 12b — pytest run locally (16 passed); CI workflow reviewed
 [x] Task 13  — terraform destroy completed; no resources remain
@@ -1362,12 +1364,30 @@ aws logs tail /aws/lambda/TechStream-prod-RCASummariser --since 5m --region eu-w
 ```
 → Log shows `Bedrock RCA generated` (AI email) **or** `Bedrock blocked by SCP — sending raw-insight email` (graceful fallback). Either way the incident email is sent.
 
-### 6 · CPU variant (optional)
+### 6 · CPU variant — native auto-scaling (not the Lambda)
+CPU saturation is handled by the **ASG target-tracking policy** (scale out, then back in), not the remediator. Watch the fleet grow, not a remediation event.
+```bash
+# once: 1-minute metrics so the policy reacts fast
+aws ec2 monitor-instances --instance-ids "$INSTANCE_ID" --region eu-west-1
+
+# peg hard (native 'yes' loops) for 7 min
+aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
+  --parameters '{"commands":["N=$(( $(nproc) * 2 )); for i in $(seq $N); do timeout 420 yes > /dev/null & done; wait"]}' \
+  --region eu-west-1 --query 'Command.CommandId' --output text
+
+# watch Desired climb, then fall back after load ends
+watch -n 20 'aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names TechStream-prod-ASG \
+  --region eu-west-1 --query "AutoScalingGroups[0].{Desired:DesiredCapacity,InService:length(Instances[?LifecycleState==\`InService\`])}"'
+```
+
+### 6b · Memory variant — Lambda restart + diagnostics
+`Memory-High` → EventBridge → Remediator Lambda: **captures diagnostics** (`/techstream/diagnostics`) then **restarts `techstream`**.
 ```bash
 aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
-  --parameters '{"commands":["python3.11 /tmp/chaos.py --scenario cpu_spike --region eu-west-1 --duration 180"]}' \
+  --parameters '{"commands":["python3.11 /tmp/chaos.py --scenario memory_leak --region eu-west-1"]}' \
   --region eu-west-1 --query 'Command.CommandId' --output text
-# then watch --alarm-name-prefix TechStream-prod-CPU  (run `aws ec2 monitor-instances --instance-ids "$INSTANCE_ID" --region eu-west-1` once for 1-min metrics)
+# watch: aws logs tail /techstream/remediation-events --follow --region eu-west-1  (action_taken: service_restart)
+#        aws logs tail /techstream/diagnostics --follow --region eu-west-1        (the captured snapshot)
 ```
 
 ### One-command version (fully automated)
