@@ -1279,22 +1279,107 @@ aws logs tail /aws/lambda/TechStream-prod-RCASummariser \
 ## Lab Completion Checklist
 
 ```
-[ ] Task 0   — AWS CLI configured and sts get-caller-identity returns account ID
-[ ] Task 1   — Email verified in SES; Bedrock Claude Sonnet access granted
-[ ] Task 2   — Explored repository structure and key files
-[ ] Task 3   — terraform.tfvars filled in with real email and password
-[ ] Task 4   — terraform apply completed; all 7 modules green; outputs saved
-[ ] Task 4e  — SNS subscription confirmation emails clicked
-[ ] Task 5   — Monitoring EC2 bootstrap complete; prometheus + grafana-server services active
-[ ] Task 5   — Prometheus EC2 SD showing both techstream_app and node jobs UP (4 targets)
-[ ] Task 6   — Component checks pass (EC2 InService, Flask healthy with the real JSON body, node_exporter active, alarms OK)
-[ ] Task 7   — Grafana dashboard open and showing live data; Prometheus datasource green
-[ ] Task 8   — chaos.py http_500 run on an instance via SSM; Error Rate panel turned red in Grafana
-[ ] Task 9   — Alarm fired (ALARM state observed); Lambda audit log appeared in Terminal 1
-[ ] Task 9   — Alarm returned to OK; Grafana Error Rate panel green again
-[ ] Task 10  — RCA email received (Bedrock summary, or raw-insight fallback with yellow banner)
-[ ] Task 11  — CPU spike (and optionally memory_leak) scenario run via SSM; alarm fired and healed
-[ ] Task 12  — verify_healing.sh completed with PASS
-[ ] Task 12b — pytest run locally (16 passed); CI workflow reviewed
-[ ] Task 13  — terraform destroy completed; no resources remain
+[x] Task 0   — AWS CLI configured and sts get-caller-identity returns account ID
+[x] Task 1   — Email verified in SES; Bedrock Claude Sonnet access granted
+[x] Task 2   — Explored repository structure and key files
+[x] Task 3   — terraform.tfvars filled in with real email and password
+[x] Task 4   — terraform apply completed; all 7 modules green; outputs saved
+[x] Task 4e  — SNS subscription confirmation emails clicked
+[x] Task 5   — Monitoring EC2 bootstrap complete; prometheus + grafana-server services active
+[x] Task 5   — Prometheus EC2 SD showing both techstream_app and node jobs UP (4 targets)
+[x] Task 6   — Component checks pass (EC2 InService, Flask healthy with the real JSON body, node_exporter active, alarms OK)
+[x] Task 7   — Grafana dashboard open and showing live data; Prometheus datasource green
+[x] Task 8   — chaos.py http_500 run on an instance via SSM; Error Rate panel turned red in Grafana
+[x] Task 9   — Alarm fired (ALARM state observed); Lambda audit log appeared in Terminal 1
+[x] Task 9   — Alarm returned to OK; Grafana Error Rate panel green again
+[x] Task 10  — RCA email received (Bedrock summary, or raw-insight fallback with yellow banner)
+[x] Task 11  — CPU spike (and optionally memory_leak) scenario run via SSM; alarm fired and healed
+[x] Task 12  — verify_healing.sh completed with PASS
+[x] Task 12b — pytest run locally (16 passed); CI workflow reviewed
+[x] Task 13  — terraform destroy completed; no resources remain
 ```
+
+---
+
+## Appendix — Live Demo Cheat-Sheet (make it break, watch it heal)
+
+> Fast copy-paste for a live demo / when asked to "show it". Run everything **from the repo root**. This drives the full loop: inject a fault → alarm fires → Lambda heals → recovery → (optional) AI RCA email.
+
+### 0 · Shell setup — paste once in *each* terminal you open
+```bash
+export AWS_ACCESS_KEY_ID=...        # paste FRESH sandbox creds (they expire)
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_SESSION_TOKEN=...
+export MSYS_NO_PATHCONV=1           # Windows/Git Bash only (stops path mangling)
+```
+
+### 1 · Terminal 1 — pick an instance & stage the chaos script
+```bash
+INSTANCE_ID=$(aws autoscaling describe-auto-scaling-groups \
+  --auto-scaling-group-names TechStream-prod-ASG --region eu-west-1 \
+  --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`]|[0].InstanceId' --output text)
+echo "INSTANCE_ID=$INSTANCE_ID"     # must be i-... (if None, wait for an InService instance)
+
+CHAOS_B64=$(base64 -w0 chaos/chaos.py 2>/dev/null || base64 chaos/chaos.py | tr -d '\n')
+aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
+  --parameters "{\"commands\":[\"echo '$CHAOS_B64' | base64 -d > /tmp/chaos.py && echo staged\"]}" \
+  --region eu-west-1 --query 'Command.CommandId' --output text
+```
+
+### 2 · Open two watch windows
+**Terminal 2 — alarm state (every 15 s):**
+```bash
+while true; do echo -n "$(date -u +%H:%M:%S)  "; \
+  aws cloudwatch describe-alarms --alarm-name-prefix TechStream-prod-ErrorRate \
+  --region eu-west-1 --query 'MetricAlarms[0].StateValue' --output text; sleep 15; done
+```
+**Terminal 3 — remediation audit log:**
+```bash
+aws logs tail /techstream/remediation-events --follow --region eu-west-1
+```
+
+### 3 · Terminal 1 — inject the fault
+```bash
+aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
+  --parameters '{"commands":["python3.11 /tmp/chaos.py --scenario http_500 --target localhost:8000 --region eu-west-1 --duration 180"]}' \
+  --region eu-west-1 --query 'Command.CommandId' --output text
+```
+
+### 4 · What to point at (the story, ~4 min)
+- **Grafana** Error Rate panel → turns **red** within ~60 s.
+- **Terminal 2** → `OK` flips to **`ALARM`** (~2 min).
+- **Terminal 3** → a JSON entry appears — `"action_taken": "service_restart"` (the Lambda healed it).
+- **Terminal 2** → **`ALARM` back to `OK`** (~1–2 min later). Self-healed, unattended.
+
+### 5 · Show the AI RCA on demand (don't wait on DevOps Guru)
+```bash
+cat > rca_event.json <<'EOF'
+{"Records":[{"Sns":{"Message":"{\"InsightId\":\"demo-0001\",\"Severity\":\"HIGH\",\"Type\":\"Errors\",\"Anomalies\":[{\"Description\":\"Simulated 5xx spike on /api/v1/ingest\"}]}"}}]}
+EOF
+aws lambda invoke --function-name TechStream-prod-RCASummariser --region eu-west-1 \
+  --cli-binary-format raw-in-base64-out --payload file://rca_event.json rca_out.json && cat rca_out.json
+aws logs tail /aws/lambda/TechStream-prod-RCASummariser --since 5m --region eu-west-1
+```
+→ Log shows `Bedrock RCA generated` (AI email) **or** `Bedrock blocked by SCP — sending raw-insight email` (graceful fallback). Either way the incident email is sent.
+
+### 6 · CPU variant (optional)
+```bash
+aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
+  --parameters '{"commands":["python3.11 /tmp/chaos.py --scenario cpu_spike --region eu-west-1 --duration 180"]}' \
+  --region eu-west-1 --query 'Command.CommandId' --output text
+# then watch --alarm-name-prefix TechStream-prod-CPU  (run `aws ec2 monitor-instances --instance-ids "$INSTANCE_ID" --region eu-west-1` once for 1-min metrics)
+```
+
+### One-command version (fully automated)
+```bash
+./chaos/verify_healing.sh --region eu-west-1
+```
+
+### 30-second fixes if something errors mid-demo
+| Symptom | Fix |
+|---------|-----|
+| `Value '[]'` or `'[None]' at 'instanceIds'` | `$INSTANCE_ID` is empty/None — re-run step 1 (need an InService instance) |
+| `logGroupName ... failed to satisfy ... pattern` (or a `C:/...` path) | `export MSYS_NO_PATHCONV=1` in that terminal |
+| `403 Forbidden` on any call | creds expired — re-paste fresh sandbox creds (step 0) |
+| `chaos.py bytes: 0` / file not found | you're not in the repo root — `cd` to it |
+| alarm won't leave `INSUFFICIENT_DATA` / CPU slow | `aws ec2 monitor-instances --instance-ids "$INSTANCE_ID" --region eu-west-1` (1-min metrics) |
